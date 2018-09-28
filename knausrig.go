@@ -4,9 +4,9 @@ import (
 	"flag"
 	"log"
 
-	"github.com/amsibamsi/kmr/job"
-	"github.com/amsibamsi/kmr/mapper"
-	"github.com/amsibamsi/kmr/reducer"
+	"github.com/amsibamsi/knausrig/job"
+	"github.com/amsibamsi/knausrig/mapper"
+	"github.com/amsibamsi/knausrig/reducer"
 )
 
 var (

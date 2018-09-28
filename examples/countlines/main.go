@@ -3,10 +3,10 @@ package main
 import (
 	"flag"
 
-	"github.com/amsibamsi/kmr"
+	"github.com/amsibamsi/knausrig"
 )
 
 func main() {
 	flag.Parse()
-	kmr.Main()
+	knausrig.Main()
 }
