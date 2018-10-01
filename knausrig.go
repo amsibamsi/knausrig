@@ -42,6 +42,23 @@ var (
 	)
 )
 
+type Key int
+
+type Value []byte
+
+type Element struct {
+	K Key
+	V Value
+}
+
+type InputFn func(part, maxPart int64, out chan<- Element) error
+
+type MapFn func(e Element) (Element, error)
+
+type ReduceFn func(e Element) (Element, error)
+
+type OutputFn func(map[Key]Value) error
+
 // run ...
 func run() error {
 	ips, err := util.LocalIPs()
