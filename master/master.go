@@ -2,7 +2,6 @@ package master
 
 import (
 	"errors"
-	"fmt"
 	"log"
 	"net"
 	"net/rpc"
@@ -10,7 +9,6 @@ import (
 	"sync/atomic"
 
 	"github.com/amsibamsi/knausrig/msg"
-	"github.com/amsibamsi/knausrig/util"
 )
 
 // Master ...
@@ -28,14 +26,12 @@ type Master struct {
 }
 
 // NewMaster ...
-func NewMaster(mapperAddrs, reducerAddrs []string) *Master {
+func NewMaster(numMappers, numReducers int) *Master {
 	return &Master{
-		mappers:       mapperAddrs,
-		numMappers:    len(mapperAddrs),
-		mappersCount:  int64(len(mapperAddrs)),
-		reducers:      reducerAddrs,
-		numReducers:   len(reducerAddrs),
-		reducersCount: int64(len(reducerAddrs)),
+		numMappers:    numMappers,
+		mappersCount:  int64(numMappers),
+		numReducers:   numReducers,
+		reducersCount: int64(numReducers),
 		reducerMap:    make(map[int64]net.TCPAddr),
 		finished:      &sync.WaitGroup{},
 	}
@@ -90,11 +86,11 @@ func (m *Master) serve() {
 }
 
 // Run ...
-func (m *Master) Run() error {
+func (m *Master) Run() (int, error) {
 	var err error
 	m.listener, err = net.Listen("tcp", ":0")
 	if err != nil {
-		return err
+		return 0, err
 	}
 	addr := m.listener.Addr()
 	log.Printf("Master listening on %q", addr)
@@ -102,38 +98,10 @@ func (m *Master) Run() error {
 	m.rpcServer.Register(m)
 	go m.serve()
 	port := addr.(*net.TCPAddr).Port
-	addrs := ""
-	ips, err := util.LocalIPs()
-	if err != nil {
-		return err
-	}
-	for _, ip := range ips {
-		if addrs == "" {
-			addrs = ip.String()
-		} else {
-			addrs = addrs + "," + ip.String()
-		}
-	}
-	for _, reducer := range m.reducers {
-		args := fmt.Sprintf(
-			"-operation reduce -masterPort %d -masterAddrs %s",
-			port,
-			addrs,
-		)
-		if err := util.RunMeRemote(reducer, args); err != nil {
-			return err
-		}
-	}
-	for _, mapper := range m.reducers {
-		args := fmt.Sprintf(
-			"-operation map -masterPort %d -masterAddrs %s",
-			port,
-			addrs,
-		)
-		if err := util.RunMeRemote(mapper, args); err != nil {
-			return err
-		}
-	}
+	return port, nil
+}
+
+// WaitFinish ...
+func (m *Master) WaitFinish() {
 	m.finished.Wait()
-	return nil
 }
