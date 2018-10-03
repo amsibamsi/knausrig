@@ -19,7 +19,7 @@ type Master struct {
 	reducers      []string
 	numReducers   int
 	reducersCount int64
-	reducerMap    map[int64]net.TCPAddr
+	reducerMap    map[int64]string
 	finished      *sync.WaitGroup
 	listener      net.Listener
 	rpcServer     *rpc.Server
@@ -32,19 +32,19 @@ func NewMaster(numMappers, numReducers int) *Master {
 		mappersCount:  int64(numMappers),
 		numReducers:   numReducers,
 		reducersCount: int64(numReducers),
-		reducerMap:    make(map[int64]net.TCPAddr),
+		reducerMap:    make(map[int64]string),
 		finished:      &sync.WaitGroup{},
 	}
 }
 
 // RegisterReducer ...
-func (m *Master) RegisterReducer(reducer *net.TCPAddr, part *msg.PartitionInfo) error {
+func (m *Master) RegisterReducer(reducer string, part *msg.PartitionInfo) error {
 	if m.reducersCount <= 0 {
 		return errors.New("No more free reducer range")
 	}
 	part.Index = atomic.AddInt64(&m.reducersCount, -1)
 	part.Max = int64(m.numReducers)
-	m.reducerMap[part.Index] = *reducer
+	m.reducerMap[part.Index] = reducer
 	m.finished.Add(1)
 	return nil
 }
@@ -54,8 +54,8 @@ func (m *Master) GetMapperInfo(req *msg.EmptyMsg, mapInfo *msg.MapperInfo) error
 	if m.mappersCount <= 0 {
 		return errors.New("No more free mapper range")
 	}
-	mapInfo.PartitionInfo.Index = atomic.AddInt64(&m.mappersCount, -1)
-	mapInfo.PartitionInfo.Max = int64(m.numMappers)
+	mapInfo.PartInfo.Index = atomic.AddInt64(&m.mappersCount, -1)
+	mapInfo.PartInfo.Max = int64(m.numMappers)
 	mapInfo.Reducers = m.reducerMap
 	m.finished.Add(1)
 	return nil

@@ -44,9 +44,8 @@ const (
 	// SSH remotely, should be expaned with Printf to add arguments for
 	// binary executed remotely.
 	// Trying to remove the binary after execution in any case, no leftovers.
-	ScriptTmpl = `sh -c 'bin=$(mktemp) && cat - > $bin && chmod +x $bin ` +
-		`&& $bin %s; binexit=$?; rm $bin; rmexit=$?; ` +
-		`if [ "$binexit" = 0 ]; then exit $rmexit; else exit $binexit; fi'`
+	ScriptTmpl = `sh -c 'bin=$(mktemp) && cat - > $bin && chmod +x $bin` +
+		` && nohup $bin %s </dev/null >/dev/null 2>&1; rm $bin`
 )
 
 // RunMeRemote copies the binary of the current process to a remote destination

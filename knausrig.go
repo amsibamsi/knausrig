@@ -43,10 +43,10 @@ var (
 )
 
 // Key ...
-type Key int
+type Key string
 
 // Value ...
-type Value []byte
+type Value string
 
 // Element ...
 type Element struct {

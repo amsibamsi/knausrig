@@ -1,6 +1,9 @@
 package msg
 
-import "net"
+var (
+	// Empty ...
+	Empty = &EmptyMsg{}
+)
 
 // EmptyMsg is used in RPC for an empty message.
 type EmptyMsg struct{}
@@ -13,6 +16,6 @@ type PartitionInfo struct {
 
 // MapperInfo ...
 type MapperInfo struct {
-	PartitionInfo PartitionInfo
-	Reducers      map[int64]net.TCPAddr
+	PartInfo PartitionInfo
+	Reducers map[int64]string
 }
