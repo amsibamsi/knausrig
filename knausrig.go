@@ -55,16 +55,16 @@ type Element struct {
 }
 
 // InputFn ...
-type InputFn func(part, maxPart int64, out chan<- Element) error
+type InputFn func(index int64) ([]Element, error)
 
 // MapFn ...
-type MapFn func(e Element) (Element, error)
+type MapFn func(e Element) ([]Element, error)
 
 // ReduceFn ...
-type ReduceFn func(e Element) (Element, error)
+type ReduceFn func(k Key, v []Value) (Element, error)
 
 // OutputFn ...
-type OutputFn func(map[Key]Value) error
+type OutputFn func(e []Element) error
 
 // run ...
 func run() error {
