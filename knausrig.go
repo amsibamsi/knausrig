@@ -29,42 +29,21 @@ var (
 			", one per line (operation: run)",
 	)
 	masterAddrs = flag.String(
-		"masterAddrs",
+		"master",
 		"",
-		"IP addresses to reach the master on"+
-			"(operation: map, reduce; required)",
-	)
-	masterPort = flag.Int(
-		"masterPort",
-		-1,
-		"IP port to reach the master on"+
+		"Comma-delimited list of <net_address>:<port> to reach the master"+
 			"(operation: map, reduce; required)",
 	)
 )
 
-// Key ...
-type Key string
-
-// Value ...
-type Value string
-
-// Element ...
-type Element struct {
-	K Key
-	V Value
-}
-
-// InputFn ...
-type InputFn func(index int64) ([]Element, error)
-
 // MapFn ...
-type MapFn func(e Element) ([]Element, error)
+type MapFn func(int64, chan<- [2]string) error
 
 // ReduceFn ...
-type ReduceFn func(k Key, v []Value) (Element, error)
+type ReduceFn func([]string) (string, error)
 
 // OutputFn ...
-type OutputFn func(e []Element) error
+type OutputFn func(map[string]string) error
 
 // run ...
 func run() error {
@@ -87,16 +66,14 @@ func run() error {
 		return err
 	}
 	for _, ip := range ips {
-		if addrs == "" {
-			addrs = ip.String()
-		} else {
-			addrs = addrs + "," + ip.String()
+		if addrs != "" {
+			addrs = addrs + ","
 		}
+		addrs = addrs + ip.String() + ":" + port
 	}
 	for _, reducer := range reducers {
 		args := fmt.Sprintf(
-			"-operation reduce -masterPort %d -masterAddrs %s",
-			port,
+			"-operation reduce -master %s",
 			addrs,
 		)
 		if err := util.RunMeRemote(reducer, args); err != nil {
@@ -105,8 +82,7 @@ func run() error {
 	}
 	for _, mapper := range mappers {
 		args := fmt.Sprintf(
-			"-operation map -masterPort %d -masterAddrs %s",
-			port,
+			"-operation map -master %s",
 			addrs,
 		)
 		if err := util.RunMeRemote(mapper, args); err != nil {
@@ -119,7 +95,6 @@ func run() error {
 
 // MapReduce ...
 type MapReduce struct {
-	inputFn  InputFn
 	mapFn    MapFn
 	reduceFn ReduceFn
 	outputFn OutputFn
@@ -132,9 +107,9 @@ func (m *MapReduce) Main() error {
 	case "run":
 		return run()
 	case "map":
-		mapper.NewMapper(inputFn, mapFn).Run(*masterAddrs, *masterPort)
+		mapper.NewMapper(mapFn).Run(*masterAddrs)
 	case "reduce":
-		reducer.NewReducer(reduceFn).Run(*masterAddrs, *masterPort)
+		reducer.NewReducer(reduceFn).Run(*masterAddrs)
 	default:
 		return fmt.Errorf("Unknown operation: %q", *operation)
 	}

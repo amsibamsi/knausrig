@@ -2,6 +2,7 @@ package master
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/rpc"
@@ -13,57 +14,84 @@ import (
 
 // Master ...
 type Master struct {
-	mappers       []string
-	numMappers    int
-	mappersCount  int64
-	reducers      []string
-	numReducers   int
-	reducersCount int64
-	reducerMap    map[int64]string
-	finished      *sync.WaitGroup
-	listener      net.Listener
-	rpcServer     *rpc.Server
+	mappers          []string
+	numMappers       int
+	mappersCount     int64
+	mappersFinished  int64
+	reducers         []string
+	numReducers      int
+	reducersCount    int64
+	reducerMap       map[int64]string
+	reducersFinished *sync.WaitGroup
+	outputDone       *sync.WaitGroup
+	listener         net.Listener
+	rpcServer        *rpc.Server
 }
 
 // NewMaster ...
 func NewMaster(numMappers, numReducers int) *Master {
-	return &Master{
-		numMappers:    numMappers,
-		mappersCount:  int64(numMappers),
-		numReducers:   numReducers,
-		reducersCount: int64(numReducers),
-		reducerMap:    make(map[int64]string),
-		finished:      &sync.WaitGroup{},
+	m := Master{
+		numMappers:       numMappers,
+		mappersCount:     0,
+		mappersFinished:  0,
+		numReducers:      numReducers,
+		reducersCount:    0,
+		reducerMap:       make(map[int64]string),
+		reducersFinished: &sync.WaitGroup{},
+		outputDone:       &sync.WaitGroup{},
 	}
+	m.reducersFinished.Add(numReducers)
+	m.outputDone.Add(1)
+	return &m
 }
 
 // RegisterReducer ...
 func (m *Master) RegisterReducer(reducer string, part *msg.PartitionInfo) error {
-	if m.reducersCount <= 0 {
+	part.Index = atomic.AddInt64(&m.reducersCount, 1)
+	if m.reducersCount > int64(m.numReducers) {
 		return errors.New("No more free reducer range")
 	}
-	part.Index = atomic.AddInt64(&m.reducersCount, -1)
 	part.Max = int64(m.numReducers)
 	m.reducerMap[part.Index] = reducer
-	m.finished.Add(1)
 	return nil
 }
 
 // GetMapperInfo ...
 func (m *Master) GetMapperInfo(req *msg.EmptyMsg, mapInfo *msg.MapperInfo) error {
-	if m.mappersCount <= 0 {
+	mapInfo.PartInfo.Index = atomic.AddInt64(&m.mappersCount, 1)
+	if m.mappersCount > int64(m.numMappers) {
 		return errors.New("No more free mapper range")
 	}
-	mapInfo.PartInfo.Index = atomic.AddInt64(&m.mappersCount, -1)
 	mapInfo.PartInfo.Max = int64(m.numMappers)
 	mapInfo.Reducers = m.reducerMap
-	m.finished.Add(1)
 	return nil
 }
 
-// Finished ...
-func (m *Master) Finished(req *msg.EmptyMsg, resp *msg.EmptyMsg) error {
-	m.finished.Done()
+// MapperFinished ...
+func (m *Master) MapperFinished(req *msg.EmptyMsg, resp *msg.EmptyMsg) error {
+	c := atomic.AddInt64(&m.mappersFinished, 1)
+	if c > int64(m.numMappers) {
+		return errors.New("All mappers already finished")
+	}
+	if c == int64(m.numMappers) {
+		for _, r := range m.reducerMap {
+			conn, err := net.Dial("tcp", r)
+			if err != nil {
+				return err
+			}
+			client := rpc.NewClient(conn)
+			if err := client.Call("Reducer.Start", msg.Empty, msg.Empty); err != nil {
+				return err
+			}
+			client.Close()
+		}
+	}
+	return nil
+}
+
+// Output ...
+func (m *Master) Output(req map[string]string, resp *msg.EmptyMsg) error {
+	fmt.Printf("Final output: %+v\n", req)
 	return nil
 }
 
@@ -103,5 +131,6 @@ func (m *Master) Run() (int, error) {
 
 // WaitFinish ...
 func (m *Master) WaitFinish() {
-	m.finished.Wait()
+	m.reducersFinished.Wait()
+	m.outputDone.Wait()
 }
