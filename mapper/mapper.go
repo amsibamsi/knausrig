@@ -5,38 +5,30 @@ import (
 	"log"
 	"net"
 	"net/rpc"
+	"os"
 	"strings"
 
-	"github.com/amsibamsi/knausrig"
+	"github.com/amsibamsi/knausrig/mapreduce"
 	"github.com/amsibamsi/knausrig/msg"
+)
+
+var (
+	logger = log.New(os.Stderr, "", 0)
 )
 
 // Mapper ...
 type Mapper struct {
-	mapFn          knausrig.MapFn
-	listener       net.Listener
-	server         *rpc.Server
+	mapFn          mapreduce.MapFn
 	client         *rpc.Client
 	reducers       map[int64]string
 	reducerClients map[int64]*rpc.Client
 }
 
 // NewMapper ...
-func NewMapper(mapFn knausrig.MapFn) *Mapper {
+func NewMapper(mapFn mapreduce.MapFn) *Mapper {
 	return &Mapper{
 		mapFn:          mapFn,
 		reducerClients: make(map[int64]*rpc.Client),
-	}
-}
-
-func (m *Mapper) serve() {
-	for {
-		conn, err := m.listener.Accept()
-		if err != nil {
-			log.Printf("Error accepting connection: %v", err)
-			continue
-		}
-		m.server.ServeConn(conn)
 	}
 }
 
@@ -44,29 +36,30 @@ func (m *Mapper) reducerClient(part int64) (*rpc.Client, error) {
 	if client, ok := m.reducerClients[part]; ok {
 		return client, nil
 	}
-	conn, err := net.Dial("tcp", m.reducers[part])
+	addrs := strings.Split(m.reducers[part], ",")
+	var conn net.Conn
+	var err error
+	for _, addr := range addrs {
+		conn, err = net.Dial("tcp", addr)
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
 	client := rpc.NewClient(conn)
-	m.reducers[part] = client
+	m.reducerClients[part] = client
 	return client, nil
 }
 
 // Run ...
 func (m *Mapper) Run(masterAddrs string) error {
-	m.listener, err = net.Listen("tcp", ":0")
-	if err != nil {
-		return 0, err
-	}
-	m.server = rpc.NewServer()
-	m.server.Register(m)
-	go m.serve()
-	addrs := strings.Split(masterAddrs, ",")
 	var err error
-	var conn net.Addr
+	addrs := strings.Split(masterAddrs, ",")
+	var conn net.Conn
 	for _, addr := range addrs {
-		conn, err := net.Dial("tcp", addr)
+		conn, err = net.Dial("tcp", addr)
 		if err == nil {
 			break
 		}
@@ -76,23 +69,22 @@ func (m *Mapper) Run(masterAddrs string) error {
 	}
 	m.client = rpc.NewClient(conn)
 	defer m.client.Close()
-	empty := new(msg.EmptyMsg)
 	info := new(msg.MapperInfo)
-	if err := m.client.Call("Master.GetMapperInfo", empty, info); err != nil {
+	if err := m.client.Call("Master.GetMapperInfo", msg.Empty, info); err != nil {
 		return err
 	}
 	m.reducers = info.Reducers
 	out := make(chan [2]string)
 	go func() {
-		m.mapFn(info.PartInfo.Index, out)
+		m.mapFn(info.Partition, out)
 		close(out)
 	}()
 	for e := range out {
 		h := fnv.New64a()
 		h.Write([]byte(e[0]))
 		hi := h.Sum64()
-		p := hi % len(info.Reducers)
-		c, err := m.reducerClient(p)
+		p := hi % uint64(len(info.Reducers))
+		c, err := m.reducerClient(int64(p))
 		if err != nil {
 			return err
 		}
@@ -101,4 +93,5 @@ func (m *Mapper) Run(masterAddrs string) error {
 	if err := m.client.Call("Master.MapperFinished", msg.Empty, msg.Empty); err != nil {
 		return err
 	}
+	return nil
 }

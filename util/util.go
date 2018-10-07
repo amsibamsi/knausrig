@@ -1,7 +1,7 @@
 package util
 
 import (
-	"bytes"
+	"bufio"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -45,54 +45,60 @@ const (
 	// binary executed remotely.
 	// Trying to remove the binary after execution in any case, no leftovers.
 	ScriptTmpl = `sh -c 'bin=$(mktemp) && cat - > $bin && chmod +x $bin` +
-		` && nohup $bin %s </dev/null >/dev/null 2>&1; rm $bin`
+		` && $bin %s; rm $bin'`
 )
 
 // RunMeRemote copies the binary of the current process to a remote destination
 // and tries to execute it there via SSH. The supplied args are passed to the
 // executable when it's run remotely. The binary is copied to a temp file on
-// the remote host, and removed again after successfull execution. The dst
-// argument can be any valid destination understood by the 'ssh' client
-// executable.
-func RunMeRemote(dst string, args string) error {
+// the remote host, and removed again after execution. The dst argument can be
+// any valid destination understood by the 'ssh' client executable.
+// Does not wait for the command to finish, returns the command.
+func RunMeRemote(id, dst, args string) (*exec.Cmd, error) {
 	cmd := exec.Command("ssh", dst, fmt.Sprintf(ScriptTmpl, args))
-	log.Printf(
-		"Starting remote command %q on destination %q",
-		cmd.Args,
-		dst,
-	)
 	exeFilename, err := os.Executable()
 	exe, err := os.Open(exeFilename)
+	if err != nil {
+		return nil, err
+	}
 	defer exe.Close()
-	if err != nil {
-		return err
-	}
-	if err != nil {
-		return err
-	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	go func() {
+		scan := bufio.NewScanner(stdout)
+		for scan.Scan() {
+			log.Printf("%s: %s", id, scan.Text())
+		}
+		if err := scan.Err(); err != nil {
+			log.Printf("%s: Error reading output: %s", id, err)
+		}
+	}()
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+	go func() {
+		scan := bufio.NewScanner(stderr)
+		for scan.Scan() {
+			log.Printf("%s: stderr: %s", id, scan.Text())
+		}
+		if err := scan.Err(); err != nil {
+			log.Printf("%s: Error reading error output: %s", id, err)
+		}
+	}()
+	log.Printf("Remote %s: Command: %q", id, cmd.Args)
 	if err := cmd.Start(); err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := io.Copy(stdin, exe); err != nil {
-		return err
+		return nil, err
 	}
 	stdin.Close()
-	err = cmd.Wait()
-	for _, line := range strings.Split(stdout.String(), "\n") {
-		log.Printf("Remote command out: %q", line)
-	}
-	for _, line := range strings.Split(stderr.String(), "\n") {
-		log.Printf("Remote command err: %q", line)
-	}
-	if err != nil {
-		return err
-	}
-	return nil
+	return cmd, nil
 }

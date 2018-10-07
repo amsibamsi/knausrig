@@ -4,29 +4,37 @@ import (
 	"log"
 	"net"
 	"net/rpc"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 
-	"github.com/amsibamsi/knausrig"
+	"github.com/amsibamsi/knausrig/mapreduce"
 	"github.com/amsibamsi/knausrig/msg"
+	"github.com/amsibamsi/knausrig/util"
+)
+
+var (
+	logger = log.New(os.Stderr, "", 0)
 )
 
 // Reducer ...
 type Reducer struct {
-	reduceFn knausrig.ReduceFn
+	reduceFn mapreduce.ReduceFn
+	listener net.Listener
 	server   *rpc.Server
 	client   *rpc.Client
 	done     *sync.WaitGroup
-	elements map[string]string
+	elements map[string][]string
 	lock     *sync.Mutex
 }
 
 // NewReducer ...
-func NewReducer(reduceFn kanusrig.ReduceFn) *Reducer {
-	r := &Reducer{
+func NewReducer(reduceFn mapreduce.ReduceFn) *Reducer {
+	r := Reducer{
 		reduceFn: reduceFn,
-		done:     *sync.WaitGroup{},
-		elements: make(map[string]string),
+		done:     &sync.WaitGroup{},
+		elements: make(map[string][]string),
 		lock:     &sync.Mutex{},
 	}
 	r.done.Add(1)
@@ -37,7 +45,7 @@ func (r *Reducer) serve() {
 	for {
 		conn, err := r.listener.Accept()
 		if err != nil {
-			log.Printf("Error accepting connection: %v", err)
+			logger.Printf("Error accepting connection: %v", err)
 			continue
 		}
 		r.server.ServeConn(conn)
@@ -45,21 +53,21 @@ func (r *Reducer) serve() {
 }
 
 // Element ...
-func (r *Reducer) Element(e [2]string, _ msg.Empty) error {
+func (r *Reducer) Element(e [2]string, _ *msg.EmptyMsg) error {
 	r.lock.Lock()
 	defer r.lock.Unlock()
 	if _, ok := r.elements[e[0]]; !ok {
-		r.elements[e[0]] = make([]string)
+		r.elements[e[0]] = make([]string, 1)
 	}
 	r.elements[e[0]] = append(r.elements[e[0]], e[1])
 	return nil
 }
 
 // Start ...
-func (r *Reducer) Start(_ msg.Emtpy, _ msg.Empty) error {
+func (r *Reducer) Start(_ *msg.EmptyMsg, _ *msg.EmptyMsg) error {
 	out := make(map[string]string)
 	for k, v := range r.elements {
-		e, err := r.reduceFn(e)
+		e, err := r.reduceFn(k, v)
 		if err != nil {
 			return err
 		}
@@ -74,18 +82,19 @@ func (r *Reducer) Start(_ msg.Emtpy, _ msg.Empty) error {
 
 // Run ...
 func (r *Reducer) Run(masterAddrs string) error {
+	var err error
 	r.listener, err = net.Listen("tcp", ":0")
 	if err != nil {
-		return 0, err
+		return err
 	}
 	r.server = rpc.NewServer()
 	r.server.Register(r)
+	port := r.listener.Addr().(*net.TCPAddr).Port
 	go r.serve()
-	addrs := strings.Split(masterAddrs, ",")
-	var err error
-	var conn net.Addr
-	for _, addr := range addrs {
-		conn, err := net.Dial("tcp", addr)
+	logger.Printf("Serving on %q", r.listener.Addr())
+	var conn net.Conn
+	for _, addr := range strings.Split(masterAddrs, ",") {
+		conn, err = net.Dial("tcp", addr)
 		if err == nil {
 			break
 		}
@@ -95,13 +104,26 @@ func (r *Reducer) Run(masterAddrs string) error {
 	}
 	r.client = rpc.NewClient(conn)
 	defer r.client.Close()
-	empty := new(msg.EmptyMsg)
-	info := new(msg.PartitionInfo)
-	if err := m.client.Call("Master.RegisterReducer", empty, info); err != nil {
+	logger.Printf("Connected to master on %q", conn.RemoteAddr())
+	addrs := ""
+	ips, err := util.LocalIPs()
+	if err != nil {
 		return err
 	}
+	for _, ip := range ips {
+		if addrs != "" {
+			addrs = addrs + ","
+		}
+		addrs = addrs + ip.String() + ":" + strconv.Itoa(port)
+	}
+	if err := r.client.Call("Master.RegisterReducer", &addrs, msg.Empty); err != nil {
+		return err
+	}
+	logger.Printf("Registered at master")
 	r.done.Wait()
 	if err := r.client.Call("Master.ReducerFinished", msg.Empty, msg.Empty); err != nil {
 		return err
 	}
+	logger.Printf("Finished")
+	return nil
 }

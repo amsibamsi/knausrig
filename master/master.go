@@ -32,10 +32,10 @@ type Master struct {
 func NewMaster(numMappers, numReducers int) *Master {
 	m := Master{
 		numMappers:       numMappers,
-		mappersCount:     0,
+		mappersCount:     -1,
 		mappersFinished:  0,
 		numReducers:      numReducers,
-		reducersCount:    0,
+		reducersCount:    -1,
 		reducerMap:       make(map[int64]string),
 		reducersFinished: &sync.WaitGroup{},
 		outputDone:       &sync.WaitGroup{},
@@ -46,23 +46,28 @@ func NewMaster(numMappers, numReducers int) *Master {
 }
 
 // RegisterReducer ...
-func (m *Master) RegisterReducer(reducer string, part *msg.PartitionInfo) error {
-	part.Index = atomic.AddInt64(&m.reducersCount, 1)
-	if m.reducersCount > int64(m.numReducers) {
+func (m *Master) RegisterReducer(addrs *string, _ *msg.EmptyMsg) error {
+	p := atomic.AddInt64(&m.reducersCount, 1)
+	if p > int64(m.numReducers) {
 		return errors.New("No more free reducer range")
 	}
-	part.Max = int64(m.numReducers)
-	m.reducerMap[part.Index] = reducer
+	m.reducerMap[p] = *addrs
+	log.Printf("New reducer %q for partition %v", *addrs, p)
+	return nil
+}
+
+// ReducerFinished ...
+func (m *Master) ReducerFinished(_ *msg.EmptyMsg, _ *msg.EmptyMsg) error {
+	m.reducersFinished.Done()
 	return nil
 }
 
 // GetMapperInfo ...
-func (m *Master) GetMapperInfo(req *msg.EmptyMsg, mapInfo *msg.MapperInfo) error {
-	mapInfo.PartInfo.Index = atomic.AddInt64(&m.mappersCount, 1)
+func (m *Master) GetMapperInfo(_ *msg.EmptyMsg, mapInfo *msg.MapperInfo) error {
+	mapInfo.Partition = atomic.AddInt64(&m.mappersCount, 1)
 	if m.mappersCount > int64(m.numMappers) {
 		return errors.New("No more free mapper range")
 	}
-	mapInfo.PartInfo.Max = int64(m.numMappers)
 	mapInfo.Reducers = m.reducerMap
 	return nil
 }
@@ -95,12 +100,6 @@ func (m *Master) Output(req map[string]string, resp *msg.EmptyMsg) error {
 	return nil
 }
 
-// Log ...
-func (m *Master) Log(msg *string, resp *msg.EmptyMsg) error {
-	log.Printf("Remote: %s", *msg)
-	return nil
-}
-
 // serve ...
 func (m *Master) serve() {
 	for {
@@ -121,10 +120,10 @@ func (m *Master) Run() (int, error) {
 		return 0, err
 	}
 	addr := m.listener.Addr()
-	log.Printf("Master listening on %q", addr)
 	m.rpcServer = rpc.NewServer()
 	m.rpcServer.Register(m)
 	go m.serve()
+	log.Printf("Serving on %q", addr)
 	port := addr.(*net.TCPAddr).Port
 	return port, nil
 }
