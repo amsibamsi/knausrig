@@ -69,16 +69,21 @@ func (m *Mapper) Run(masterAddrs string) error {
 	}
 	m.client = rpc.NewClient(conn)
 	defer m.client.Close()
+	logger.Printf("Connected to master on %q", conn.RemoteAddr())
 	info := new(msg.MapperInfo)
 	if err := m.client.Call("Master.GetMapperInfo", msg.Empty, info); err != nil {
 		return err
 	}
 	m.reducers = info.Reducers
+	logger.Printf("Got partition %d", info.Partition)
 	out := make(chan [2]string)
 	go func() {
+		logger.Print("Starting mapping ...")
 		m.mapFn(info.Partition, out)
 		close(out)
+		logger.Print("... mapping finished")
 	}()
+	logger.Print("Starting to send to reducers ...")
 	for e := range out {
 		h := fnv.New64a()
 		h.Write([]byte(e[0]))
@@ -88,10 +93,14 @@ func (m *Mapper) Run(masterAddrs string) error {
 		if err != nil {
 			return err
 		}
-		c.Call("Reducer.Element", &e, msg.Empty)
+		if err := c.Call("Reducer.Element", &e, msg.Empty); err != nil {
+			return err
+		}
 	}
+	logger.Print("... sending to reducers finished")
 	if err := m.client.Call("Master.MapperFinished", msg.Empty, msg.Empty); err != nil {
 		return err
 	}
+	logger.Print("Finished")
 	return nil
 }

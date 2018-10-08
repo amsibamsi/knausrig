@@ -12,13 +12,22 @@ import (
 	"strings"
 )
 
-// ReadLines reads the entire file and returns its lines as a list of strings.
+// ReadLines reads the entire file and returns all lines that are not just
+// whitespace.
 func ReadLines(filename string) ([]string, error) {
 	content, err := ioutil.ReadFile(filename)
 	if err != nil {
 		return nil, err
 	}
-	return strings.Split(string(content), "\n"), nil
+	split := strings.Split(string(content), "\n")
+	var lines []string
+	for _, s := range split {
+		l := strings.TrimSpace(s)
+		if l != "" {
+			lines = append(lines, l)
+		}
+	}
+	return lines, nil
 }
 
 // LocalIPs returns the list of local non-loopback IP addresses.
@@ -86,7 +95,7 @@ func RunMeRemote(id, dst, args string) (*exec.Cmd, error) {
 	go func() {
 		scan := bufio.NewScanner(stderr)
 		for scan.Scan() {
-			log.Printf("%s: stderr: %s", id, scan.Text())
+			log.Printf("%s: %s", id, scan.Text())
 		}
 		if err := scan.Err(); err != nil {
 			log.Printf("%s: Error reading error output: %s", id, err)

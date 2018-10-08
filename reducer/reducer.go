@@ -48,7 +48,7 @@ func (r *Reducer) serve() {
 			logger.Printf("Error accepting connection: %v", err)
 			continue
 		}
-		r.server.ServeConn(conn)
+		go r.server.ServeConn(conn)
 	}
 }
 
@@ -57,16 +57,19 @@ func (r *Reducer) Element(e [2]string, _ *msg.EmptyMsg) error {
 	r.lock.Lock()
 	defer r.lock.Unlock()
 	if _, ok := r.elements[e[0]]; !ok {
-		r.elements[e[0]] = make([]string, 1)
+		r.elements[e[0]] = make([]string, 0)
 	}
 	r.elements[e[0]] = append(r.elements[e[0]], e[1])
+	logger.Print("Got new element")
 	return nil
 }
 
 // Start ...
 func (r *Reducer) Start(_ *msg.EmptyMsg, _ *msg.EmptyMsg) error {
+	logger.Print("Starting to reduce ...")
 	out := make(map[string]string)
 	for k, v := range r.elements {
+		logger.Printf("Reducing key %q with %d elements", k, len(v))
 		e, err := r.reduceFn(k, v)
 		if err != nil {
 			return err
@@ -77,6 +80,7 @@ func (r *Reducer) Start(_ *msg.EmptyMsg, _ *msg.EmptyMsg) error {
 		return err
 	}
 	r.done.Done()
+	logger.Print("Reducing finished")
 	return nil
 }
 
@@ -119,11 +123,11 @@ func (r *Reducer) Run(masterAddrs string) error {
 	if err := r.client.Call("Master.RegisterReducer", &addrs, msg.Empty); err != nil {
 		return err
 	}
-	logger.Printf("Registered at master")
+	logger.Print("Registered at master")
 	r.done.Wait()
 	if err := r.client.Call("Master.ReducerFinished", msg.Empty, msg.Empty); err != nil {
 		return err
 	}
-	logger.Printf("Finished")
+	logger.Print("Finished")
 	return nil
 }

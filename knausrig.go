@@ -72,27 +72,23 @@ func run() error {
 		addrs = addrs + ip.String() + ":" + strconv.Itoa(port)
 	}
 	for i, reducer := range reducers {
-		if reducer != "" {
-			args := fmt.Sprintf(
-				"-operation reduce -master %s",
-				addrs,
-			)
-			id := "reducer-" + strconv.Itoa(i)
-			if _, err := util.RunMeRemote(id, reducer, args); err != nil {
-				return err
-			}
+		args := fmt.Sprintf(
+			"-operation reduce -master %s",
+			addrs,
+		)
+		id := "reducer-" + strconv.Itoa(i)
+		if _, err := util.RunMeRemote(id, reducer, args); err != nil {
+			return err
 		}
 	}
 	for i, mapper := range mappers {
-		if mapper != "" {
-			args := fmt.Sprintf(
-				"-operation map -master %s",
-				addrs,
-			)
-			id := "mapper-" + strconv.Itoa(i)
-			if _, err := util.RunMeRemote(id, mapper, args); err != nil {
-				return err
-			}
+		args := fmt.Sprintf(
+			"-operation map -master %s",
+			addrs,
+		)
+		id := "mapper-" + strconv.Itoa(i)
+		if _, err := util.RunMeRemote(id, mapper, args); err != nil {
+			return err
 		}
 	}
 	master.WaitFinish()
