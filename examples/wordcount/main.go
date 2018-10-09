@@ -8,9 +8,13 @@ import (
 )
 
 func words(part int64, out chan<- [2]string) error {
-	out <- [2]string{
-		fmt.Sprintf("map%d", part),
-		"1",
+	for i := 0; int64(i) <= part; i++ {
+		for j := 0; j < i+1; j++ {
+			out <- [2]string{
+				fmt.Sprintf("word-%d", i),
+				"1",
+			}
+		}
 	}
 	return nil
 }
