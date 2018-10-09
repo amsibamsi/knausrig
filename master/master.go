@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/amsibamsi/knausrig/mapreduce"
 	"github.com/amsibamsi/knausrig/msg"
 )
 
@@ -27,10 +28,13 @@ type Master struct {
 	outputDone         *sync.WaitGroup
 	listener           net.Listener
 	rpcServer          *rpc.Server
+	output             map[string]string
+	outputLock         *sync.Mutex
+	outputFn           mapreduce.OutputFn
 }
 
 // NewMaster ...
-func NewMaster(numMappers, numReducers int) *Master {
+func NewMaster(numMappers, numReducers int, outputFn mapreduce.OutputFn) *Master {
 	m := Master{
 		numMappers:         numMappers,
 		mappersCount:       -1,
@@ -41,6 +45,9 @@ func NewMaster(numMappers, numReducers int) *Master {
 		reducersRegistered: &sync.WaitGroup{},
 		reducersFinished:   &sync.WaitGroup{},
 		outputDone:         &sync.WaitGroup{},
+		output:             make(map[string]string),
+		outputLock:         &sync.Mutex{},
+		outputFn:           outputFn,
 	}
 	m.reducersRegistered.Add(numReducers)
 	m.reducersFinished.Add(numReducers)
@@ -116,8 +123,11 @@ func (m *Master) MapperFinished(req *msg.EmptyMsg, resp *msg.EmptyMsg) error {
 
 // Output ...
 func (m *Master) Output(req map[string]string, resp *msg.EmptyMsg) error {
-	log.Printf("Final output: %+v\n", req)
-	m.outputDone.Done()
+	m.outputLock.Lock()
+	defer m.outputLock.Unlock()
+	for k, v := range req {
+		m.output[k] = v
+	}
 	return nil
 }
 
@@ -150,6 +160,13 @@ func (m *Master) Run() (int, error) {
 	m.rpcServer.Register(m)
 	go m.serve()
 	log.Printf("Serving on %q", addr)
+	go func() {
+		m.reducersFinished.Wait()
+		if err := m.outputFn(m.output); err != nil {
+			log.Printf("Output error: %v", err)
+		}
+		m.outputDone.Done()
+	}()
 	port := addr.(*net.TCPAddr).Port
 	return port, nil
 }

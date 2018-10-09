@@ -55,7 +55,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	master := master.NewMaster(len(mappers), len(reducers))
+	master := master.NewMaster(len(mappers), len(reducers), outputFn)
 	port, err := master.Run()
 	if err != nil {
 		return err
@@ -108,7 +108,7 @@ func (m *MapReduce) Main() {
 	flag.Parse()
 	switch *operation {
 	case "run":
-		if err := run(); err != nil {
+		if err := run(m.OutputFn); err != nil {
 			log.Fatal(err)
 		}
 	case "map":
