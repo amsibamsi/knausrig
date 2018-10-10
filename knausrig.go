@@ -46,7 +46,7 @@ var (
 )
 
 // run ...
-func run() error {
+func run(outputFn mapreduce.OutputFn) error {
 	mappers, err := util.ReadLines(*mappersFilename)
 	if err != nil {
 		return err
