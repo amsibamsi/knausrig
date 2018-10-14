@@ -15,28 +15,20 @@ import (
 )
 
 var (
-	operation = flag.String(
-		"operation",
-		"",
-		"Exactly one of 'run', 'map', 'reduce' (required)",
+	mode = flag.String(
+		"mode",
+		"master",
+		"Exactly one of 'master', 'map', 'reduce'",
 	)
-	mappersFilename = flag.String(
-		"mappersFile",
-		"mappers.txt",
-		"Text file listing SSH destinations to use as mapper workers"+
-			", one per line (operation: run)",
+	config = flag.String(
+		"config",
+		"./config.json",
+		"Configuration file for master (modes: master)",
 	)
-	reducersFilename = flag.String(
-		"reducersFile",
-		"reducers.txt",
-		"Text file listing SSH destinations to use as reducer workers"+
-			", one per line (operation: run)",
-	)
-	masterAddrs = flag.String(
+	masterAddr = flag.String(
 		"master",
 		"",
-		"Comma-delimited list of <net_address>:<port> to reach the master"+
-			"(operation: map, reduce; required)",
+		"<address>:<port> of master server (required; modes: map, reduce)",
 	)
 )
 
@@ -47,29 +39,10 @@ var (
 
 // run ...
 func run(outputFn mapreduce.OutputFn) error {
-	mappers, err := util.ReadLines(*mappersFilename)
-	if err != nil {
-		return err
-	}
-	reducers, err := util.ReadLines(*reducersFilename)
-	if err != nil {
-		return err
-	}
 	master := master.NewMaster(len(mappers), len(reducers), outputFn)
-	port, err := master.Run()
+	err := master.Run()
 	if err != nil {
 		return err
-	}
-	addrs := ""
-	ips, err := util.LocalIPs()
-	if err != nil {
-		return err
-	}
-	for _, ip := range ips {
-		if addrs != "" {
-			addrs = addrs + ","
-		}
-		addrs = addrs + ip.String() + ":" + strconv.Itoa(port)
 	}
 	for i, reducer := range reducers {
 		args := fmt.Sprintf(
