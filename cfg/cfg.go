@@ -1,4 +1,4 @@
-package config
+package cfg
 
 import (
 	"encoding/json"
@@ -7,7 +7,7 @@ import (
 
 // Config holds the configuration for a MapReduce program.
 //
-// Addresses are TCP and must have the form host:port
+// Addresses are used for TCP and must have the form host:port
 type Config struct {
 
 	// Local address of the master to listen on. Mappers and reducers must be

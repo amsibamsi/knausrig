@@ -1,20 +1,68 @@
+// Package master contains the master process initiating and coordinating the
+// whole process of executing a MapReduce job.
 package master
 
 import (
 	"errors"
+	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/rpc"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 
+	"github.com/amsibamsi/knausrig/cfg"
 	"github.com/amsibamsi/knausrig/mapreduce"
 	"github.com/amsibamsi/knausrig/msg"
+	"github.com/amsibamsi/knausrig/util"
 )
 
-// Master ...
+var (
+	config = flag.String(
+		"config",
+		"./config.json",
+		"Configuration file for master (modes: master)",
+	)
+)
+
+// Service holds the RPC service exposed to mappers and reducers. All exported
+// methods on this struct are considered for exposing via RPC.
+type Service struct {
+	lock     *sync.Mutex
+	listener net.Listener
+}
+
+// NewService returns a new service listening on the specified address.
+func NewService(addr string) (*Service, error) {
+	var err error
+	s := Service{
+		lock: &sync.Mutex{},
+	}
+	s.listener, err = net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+// RegisterReducer registers a reducer with the specified <address>:<port>.
+func (s *Service) RegisterReducer(addr *string, _ *msg.EmptyMsg) error {
+	p := atomic.AddInt64(&m.reducersCount, 1)
+	if p >= int64(m.numReducers) {
+		return errors.New("No more free reducer range")
+	}
+	m.reducerMap[p] = *addrs
+	m.reducersRegistered.Done()
+	log.Printf("New reducer %q for partition %v", *addrs, p)
+	return nil
+}
+
+// Master initializes everything and controls the execution of a MapReduce job.
 type Master struct {
+	config             *cfg.Config
 	mappers            []string
 	numMappers         int
 	mappersCount       int64
@@ -34,12 +82,17 @@ type Master struct {
 }
 
 // NewMaster ...
-func NewMaster(numMappers, numReducers int, outputFn mapreduce.OutputFn) *Master {
+func NewMaster(outputFn mapreduce.OutputFn) (*Master, error) {
+	cfg, err := cfg.FromFile(*config)
+	if err != nil {
+		return nil, err
+	}
 	m := Master{
-		numMappers:         numMappers,
+		config:             cfg,
+		numMappers:         len(cfg.Mappers),
 		mappersCount:       -1,
 		mappersFinished:    0,
-		numReducers:        numReducers,
+		numReducers:        len(cfg.Reducers),
 		reducersCount:      -1,
 		reducerMap:         make(map[int64]string),
 		reducersRegistered: &sync.WaitGroup{},
@@ -49,27 +102,10 @@ func NewMaster(numMappers, numReducers int, outputFn mapreduce.OutputFn) *Master
 		outputLock:         &sync.Mutex{},
 		outputFn:           outputFn,
 	}
-	m.reducersRegistered.Add(numReducers)
-	m.reducersFinished.Add(numReducers)
+	m.reducersRegistered.Add(len(cfg.Reducers))
+	m.reducersFinished.Add(len(cfg.Reducers))
 	m.outputDone.Add(1)
-	return &m
-}
-
-// Ping ...
-func (m *Master) Ping(_ *msg.EmptyMsg, _ *msg.EmptyMsg) error {
-	return nil
-}
-
-// RegisterReducer ...
-func (m *Master) RegisterReducer(addrs *string, _ *msg.EmptyMsg) error {
-	p := atomic.AddInt64(&m.reducersCount, 1)
-	if p >= int64(m.numReducers) {
-		return errors.New("No more free reducer range")
-	}
-	m.reducerMap[p] = *addrs
-	m.reducersRegistered.Done()
-	log.Printf("New reducer %q for partition %v", *addrs, p)
-	return nil
+	return &m, nil
 }
 
 // ReducerFinished ...
@@ -144,16 +180,16 @@ func (m *Master) serve() {
 }
 
 // Run ...
-func (m *Master) Run() (int, error) {
+func (m *Master) Run() error {
 	log.Printf(
 		"Running MapReduce with %d mappers and %d reducers",
 		m.numMappers,
 		m.numReducers,
 	)
 	var err error
-	m.listener, err = net.Listen("tcp", ":0")
+	m.listener, err = net.Listen("tcp", m.config.Master)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	addr := m.listener.Addr()
 	m.rpcServer = rpc.NewServer()
@@ -167,12 +203,27 @@ func (m *Master) Run() (int, error) {
 		}
 		m.outputDone.Done()
 	}()
-	port := addr.(*net.TCPAddr).Port
-	return port, nil
-}
-
-// WaitFinish ...
-func (m *Master) WaitFinish() {
+	for i, reducer := range m.config.Reducers {
+		args := fmt.Sprintf(
+			"-mode reduce -master %s",
+			m.config.Master,
+		)
+		id := "reducer-" + strconv.Itoa(i)
+		if _, err := util.RunMeRemote(id, reducer, args); err != nil {
+			return err
+		}
+	}
+	for i, mapper := range m.config.Mappers {
+		args := fmt.Sprintf(
+			"-mode map -master %s",
+			m.config.Master,
+		)
+		id := "mapper-" + strconv.Itoa(i)
+		if _, err := util.RunMeRemote(id, mapper, args); err != nil {
+			return err
+		}
+	}
 	m.reducersFinished.Wait()
 	m.outputDone.Wait()
+	return nil
 }
