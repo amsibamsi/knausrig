@@ -31,38 +31,38 @@ var (
 // Service holds the RPC service exposed to mappers and reducers. All exported
 // methods on this struct are considered for exposing via RPC.
 type Service struct {
-	lock     *sync.Mutex
-	listener net.Listener
+	m *Master
 }
 
-// NewService returns a new service listening on the specified address.
-func NewService(addr string) (*Service, error) {
-	var err error
-	s := Service{
-		lock: &sync.Mutex{},
-	}
-	s.listener, err = net.Listen("tcp", addr)
-	if err != nil {
-		return nil, err
-	}
-	return &s, nil
+// NewService returns a new service for the given master.
+func NewService(m *Master) *Service {
+	return &Service{m: m}
 }
 
 // RegisterReducer registers a reducer with the specified <address>:<port>.
 func (s *Service) RegisterReducer(addr *string, _ *msg.EmptyMsg) error {
-	p := atomic.AddInt64(&m.reducersCount, 1)
-	if p >= int64(m.numReducers) {
-		return errors.New("No more free reducer range")
+	s.m.lock.Lock()
+	defer s.m.lock.Unlock()
+	rmap := s.m.reducerMap
+	p := len(rmap)
+	max := len(s.m.config.Reducers)
+	_, ok := rmap[addr]
+	if ok {
+		return errors.New("Reducer alread registered")
 	}
-	m.reducerMap[p] = *addrs
+	if p >= max {
+		return errors.New("Trying to register too many reducers")
+	}
+	m.reducerMap[p] = *addr
 	m.reducersRegistered.Done()
-	log.Printf("New reducer %q for partition %v", *addrs, p)
+	log.Printf("New reducer %q for partition %q", *addrs, p)
 	return nil
 }
 
 // Master initializes everything and controls the execution of a MapReduce job.
 type Master struct {
 	config             *cfg.Config
+	lock               *sync.Mutex
 	mappers            []string
 	numMappers         int
 	mappersCount       int64
@@ -89,6 +89,7 @@ func NewMaster(outputFn mapreduce.OutputFn) (*Master, error) {
 	}
 	m := Master{
 		config:             cfg,
+		lock:               &sync.Mutex{},
 		numMappers:         len(cfg.Mappers),
 		mappersCount:       -1,
 		mappersFinished:    0,
