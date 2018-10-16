@@ -27,6 +27,12 @@ var (
 		"<address>:<port> of master server"+
 			" (required; modes: map, reduce)",
 	)
+	listenAddr = flag.String(
+		"listen",
+		"",
+		"<address>:<port> for local listening"+
+			" (required; modes: map, reduce)",
+	)
 )
 
 // Job holds the 3 customized functions for the actual computations done by the
@@ -53,12 +59,16 @@ func (j *Job) Main() {
 			log.Fatal(err)
 		}
 	case "map":
-		err = mapper.NewMapper(j.MapFn).Run(*masterAddr)
+		err = mapper.NewMapper(j.MapFn).Run(*listenAddr, *masterAddr)
 		if err != nil {
 			log.Fatal(err)
 		}
 	case "reduce":
-		err = reducer.NewReducer(j.ReduceFn).Run(*masterAddr)
+		err = reducer.NewReducer(
+			*listenAddr,
+			*masterAddr,
+			*j.ReduceFn,
+		).Run()
 		if err != nil {
 			log.Fatal(err)
 		}
