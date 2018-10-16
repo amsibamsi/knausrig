@@ -18,8 +18,21 @@ var (
 	logger = log.New(os.Stderr, "", 0)
 )
 
-// Reducer ...
+// Service holds the RPC service exposed to other MapReduce processes. All
+// exported methods on this struct are considered for exposing via RPC.
+type Service struct {
+	r *Reducer
+}
+
+// NewService returns a new service for the given reducer.
+func NewService(r *Reducer) *Service {
+	return &Service{r}
+}
+
+// Reducer is the service to receive keyed data from mappers and reduce it per
+// key.
 type Reducer struct {
+	service  *Service
 	reduceFn mapreduce.ReduceFn
 	listener net.Listener
 	server   *rpc.Server
@@ -29,7 +42,7 @@ type Reducer struct {
 	lock     *sync.Mutex
 }
 
-// NewReducer ...
+// NewReducer returns a new reducer.
 func NewReducer(reduceFn mapreduce.ReduceFn) *Reducer {
 	r := Reducer{
 		reduceFn: reduceFn,
@@ -38,10 +51,12 @@ func NewReducer(reduceFn mapreduce.ReduceFn) *Reducer {
 		lock:     &sync.Mutex{},
 	}
 	r.done.Add(1)
+	r.service = NewService(&r)
 	return &r
 }
 
-func (r *Reducer) serve() {
+// serve creates a listener, and accepts and serves new network connections.
+func (r *Reducer) serve() error {
 	for {
 		conn, err := r.listener.Accept()
 		if err != nil {

@@ -10,6 +10,6 @@ type EmptyMsg struct{}
 
 // MapperInfo ...
 type MapperInfo struct {
-	Partition int64
-	Reducers  map[int64]string
+	Partition int
+	Reducers  map[int]string
 }

@@ -1,3 +1,4 @@
+// Package util provides utility functions.
 package util
 
 import (
@@ -7,6 +8,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net"
+	"net/rpc"
 	"os"
 	"os/exec"
 	"strings"
@@ -80,12 +82,13 @@ func RunMeRemote(id, dst, args string) (*exec.Cmd, error) {
 		return nil, err
 	}
 	go func() {
+		logger := log.New(os.Stderr, "["+id+"] ", 0)
 		scan := bufio.NewScanner(stdout)
 		for scan.Scan() {
-			log.Printf("%s: %s", id, scan.Text())
+			logger.Printf("%s: %s", id, scan.Text())
 		}
 		if err := scan.Err(); err != nil {
-			log.Printf("%s: Error reading output: %s", id, err)
+			logger.Printf("%s: Error reading output: %s", id, err)
 		}
 	}()
 	stderr, err := cmd.StderrPipe()
@@ -93,15 +96,16 @@ func RunMeRemote(id, dst, args string) (*exec.Cmd, error) {
 		return nil, err
 	}
 	go func() {
+		logger := log.New(os.Stderr, "["+id+"] ", 0)
 		scan := bufio.NewScanner(stderr)
 		for scan.Scan() {
-			log.Printf("%s: %s", id, scan.Text())
+			logger.Printf("%s: %s", id, scan.Text())
 		}
 		if err := scan.Err(); err != nil {
-			log.Printf("%s: Error reading error output: %s", id, err)
+			logger.Printf("%s: Error reading error output: %s", id, err)
 		}
 	}()
-	log.Printf("Remote %s: Command: %q", id, cmd.Args)
+	log.Printf("Remote %s: running command: %q", id, cmd.Args)
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -110,4 +114,30 @@ func RunMeRemote(id, dst, args string) (*exec.Cmd, error) {
 	}
 	stdin.Close()
 	return cmd, nil
+}
+
+// RPCClients lazily initializes and returns RPC clients.
+type RPCClients struct {
+	Clients map[string]*rpc.Client
+}
+
+// NewRPCClients returns a new RPCClients struct with Clients initialized to an
+// empty map.
+func NewRPCClients() *RPCClients {
+	return &RPCClients{make(map[string]*rpc.Client)}
+}
+
+// Client returns the existing RPC client for the specified address, or
+// initializes a new one and returns it.
+func (r *RPCClients) Client(addr string) (*rpc.Client, error) {
+	if client, ok := r.Clients[addr]; ok {
+		return client, nil
+	}
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	client := rpc.NewClient(conn)
+	r.Clients[addr] = client
+	return client, nil
 }
