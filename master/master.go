@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/rpc"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ var (
 		"./config.json",
 		"Configuration file for master (modes: master)",
 	)
+	logger = log.New(os.Stderr, "master", 0)
 )
 
 // Service holds the RPC service exposed to mappers and reducers. All exported
@@ -39,23 +41,19 @@ func NewService(m *Master) *Service {
 	return &Service{m: m}
 }
 
-// RegisterReducer registers a reducer with the specified <address>:<port>.
-func (s *Service) RegisterReducer(addr *string, _ *msg.EmptyMsg) error {
+// NewReducer registers a reducer with the specified <address>:<port>.
+func (s *Service) NewReducer(addr *string, _ *msg.EmptyMsg) error {
 	s.m.lock.Lock()
 	defer s.m.lock.Unlock()
 	rmap := s.m.reducerMap
 	p := len(rmap)
 	max := len(s.m.config.Reducers)
-	_, ok := rmap[addr]
-	if ok {
-		return errors.New("Reducer alread registered")
-	}
 	if p >= max {
 		return errors.New("Trying to register too many reducers")
 	}
-	m.reducerMap[p] = *addr
-	m.reducersRegistered.Done()
-	log.Printf("New reducer %q for partition %q", *addrs, p)
+	s.m.reducerMap[p] = *addr
+	s.m.reducersRegistered.Done()
+	log.Printf("New reducer %q for partition %q", *addr, p)
 	return nil
 }
 
@@ -70,7 +68,7 @@ type Master struct {
 	reducers           []string
 	numReducers        int
 	reducersCount      int64
-	reducerMap         map[int64]string
+	reducerMap         map[int]string
 	reducersRegistered *sync.WaitGroup
 	reducersFinished   *sync.WaitGroup
 	outputDone         *sync.WaitGroup
@@ -95,7 +93,7 @@ func NewMaster(outputFn mapreduce.OutputFn) (*Master, error) {
 		mappersFinished:    0,
 		numReducers:        len(cfg.Reducers),
 		reducersCount:      -1,
-		reducerMap:         make(map[int64]string),
+		reducerMap:         make(map[int]string),
 		reducersRegistered: &sync.WaitGroup{},
 		reducersFinished:   &sync.WaitGroup{},
 		outputDone:         &sync.WaitGroup{},
@@ -107,6 +105,29 @@ func NewMaster(outputFn mapreduce.OutputFn) (*Master, error) {
 	m.reducersFinished.Add(len(cfg.Reducers))
 	m.outputDone.Add(1)
 	return &m, nil
+}
+
+// serveOn creates a listener, and accepts and serves new network connections.
+func (m *Master) serveOn(addr string) error {
+	var err error
+	m.listener, err = net.Listen("tcp", m.config.Master)
+	if err != nil {
+		return err
+	}
+	m.rpcServer = rpc.NewServer()
+	m.rpcServer.Register(m)
+	go func() {
+		for {
+			conn, err := m.listener.Accept()
+			if err != nil {
+				log.Printf("Failed to accept RPC connection: %v", err)
+				continue
+			}
+			go m.rpcServer.ServeConn(conn)
+		}
+	}()
+	log.Printf("Serving on %q", m.listener.Addr())
+	return nil
 }
 
 // ReducerFinished ...
@@ -168,35 +189,14 @@ func (m *Master) Output(req map[string]string, resp *msg.EmptyMsg) error {
 	return nil
 }
 
-// serve ...
-func (m *Master) serve() {
-	for {
-		conn, err := m.listener.Accept()
-		if err != nil {
-			log.Printf("Error accepting connection: %v", err)
-			continue
-		}
-		go m.rpcServer.ServeConn(conn)
-	}
-}
-
 // Run ...
 func (m *Master) Run() error {
 	log.Printf(
 		"Running MapReduce with %d mappers and %d reducers",
-		m.numMappers,
-		m.numReducers,
+		len(m.config.Mappers),
+		len(m.config.Reducers),
 	)
 	var err error
-	m.listener, err = net.Listen("tcp", m.config.Master)
-	if err != nil {
-		return err
-	}
-	addr := m.listener.Addr()
-	m.rpcServer = rpc.NewServer()
-	m.rpcServer.Register(m)
-	go m.serve()
-	log.Printf("Serving on %q", addr)
 	go func() {
 		m.reducersFinished.Wait()
 		if err := m.outputFn(m.output); err != nil {
