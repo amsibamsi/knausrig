@@ -1,3 +1,5 @@
+// Package cfg contains the configuration for a MapReduce job and can load it
+// from a JSON file.
 package cfg
 
 import (

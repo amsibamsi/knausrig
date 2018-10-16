@@ -31,7 +31,7 @@ var (
 		"listen",
 		"",
 		"<address>:<port> for local listening"+
-			" (required; modes: map, reduce)",
+			" (required; modes: reduce)",
 	)
 )
 
@@ -59,7 +59,7 @@ func (j *Job) Main() {
 			log.Fatal(err)
 		}
 	case "map":
-		err = mapper.NewMapper(j.MapFn).Run(*listenAddr, *masterAddr)
+		err = mapper.NewMapper(*masterAddr, j.MapFn).Run()
 		if err != nil {
 			log.Fatal(err)
 		}

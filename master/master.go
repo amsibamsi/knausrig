@@ -220,7 +220,8 @@ func (m *Master) startReducing() error {
 	return nil
 }
 
-// Run ...
+// Run starts up the listener, starts reducers/mappers, runs the different
+// stages of the MapReduce process, and outputs the final result.
 func (m *Master) Run() error {
 	numReducers := len(m.config.Reducers)
 	numMappers := len(m.config.Mappers)

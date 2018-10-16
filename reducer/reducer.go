@@ -1,3 +1,4 @@
+// Package reducer contains the reducer task of a MapReduce job.
 package reducer
 
 import (
