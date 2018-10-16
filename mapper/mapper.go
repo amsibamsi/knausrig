@@ -25,7 +25,6 @@ type Mapper struct {
 	reducers       map[int]string
 	partition      int
 	reducerClients *util.RPCClients
-	output         chan [2]string
 }
 
 // NewMapper returns a new mapper.
@@ -34,7 +33,6 @@ func NewMapper(master string, mapFn mapreduce.MapFn) *Mapper {
 		master:         master,
 		mapFn:          mapFn,
 		reducerClients: util.NewRPCClients(),
-		output:         make(chan [2]string, 10),
 	}
 }
 
@@ -48,31 +46,54 @@ func (m *Mapper) connectMaster() error {
 	return nil
 }
 
-// mapData starts the map function and outputs data to a channel.
-func (m *Mapper) mapData() error {
-	if err := m.mapFn(m.partition, m.output); err != nil {
-		return err
-	}
-	close(m.output)
-	return nil
-}
-
 // shuffle sends the output from mapping to the right reducers.
-func (m *Mapper) shuffle() error {
-	for e := range m.output {
-		h := fnv.New64a()
-		h.Write([]byte(e[0]))
-		hi := h.Sum64()
-		p := int(hi % uint64(len(m.reducers)))
-		client, err := m.reducerClients.Client(m.reducers[p])
-		if err != nil {
-			return err
+//func (m *Mapper) shuffle() error {
+//	for e := range m.output {
+//		h := fnv.New64a()
+//		h.Write([]byte(e[0]))
+//		hi := h.Sum64()
+//		p := int(hi % uint64(len(m.reducers)))
+//		client, err := m.reducerClients.Client(m.reducers[p])
+//		if err != nil {
+//			return err
+//		}
+//		if err := client.Call("Service.Element", &e, msg.Empty); err != nil {
+//			return err
+//		}
+//	}
+//	return nil
+//}
+
+//
+func (m *Mapper) mapShuffle(errors chan<- struct{}) {
+	out := make(chan [2]string, 10)
+	// Input and map
+	go func() {
+		if err := m.mapFn(m.partition, out); err != nil {
+			errors <- struct{}{}
+			return
 		}
-		if err := client.Call("Service.Element", &e, msg.Empty); err != nil {
-			return err
+		close(out)
+	}()
+	// Shuffle to reducers
+	go func() {
+		for e := range out {
+			h := fnv.New64a()
+			h.Write([]byte(e[0]))
+			hi := h.Sum64()
+			p := int(hi % uint64(len(m.reducers)))
+			client, err := m.reducerClients.Client(m.reducers[p])
+			if err != nil {
+				errors <- struct{}{}
+				return
+			}
+			if err := client.Call("Service.Element", &e, msg.Empty); err != nil {
+				errors <- struct{}{}
+				return
+			}
 		}
-	}
-	return nil
+		close(errors)
+	}()
 }
 
 // Run registers the mapper with the master, getting its partition info, and starts reading data, mapping, and sending the results to the reducers.
@@ -88,11 +109,14 @@ func (m *Mapper) Run(masterAddrs string) error {
 	m.reducers = info.Reducers
 	m.partition = info.Partition
 	logger.Printf("Got partition %d", m.partition)
-	// TODO: catch errors
 	logger.Print("Starting to map and shuffle data")
-	go m.mapData()
-	if err := m.shuffle(); err != nil {
-		return err
+	errors := make(chan struct{})
+	m.mapShuffle(errors)
+	// TODO: catch errors
+	select {
+	case <-errors:
+		return errors.New("Aborting due to failures")
+	case <-time.After(time.Hours):
 	}
 	if err := m.masterClient.Call("Service.MapperFinished", msg.Empty, msg.Empty); err != nil {
 		return err
