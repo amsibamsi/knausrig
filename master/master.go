@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,7 +28,7 @@ var (
 		"./config.json",
 		"Configuration file for master (modes: master)",
 	)
-	logger = log.New(os.Stderr, "[master] ", 0)
+	logger = log.New(os.Stderr, "[master] ", log.LstdFlags)
 )
 
 // Service holds the RPC service exposed to mappers and reducers. All exported
@@ -118,6 +119,7 @@ type Master struct {
 // NewMaster ...
 func NewMaster(outputFn mapreduce.OutputFn) (*Master, error) {
 	cfg, err := cfg.FromFile(*config)
+	logger.Printf("config: %+v", *cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -170,12 +172,14 @@ func (m *Master) watchCmd(id string, cmd *exec.Cmd) {
 
 // startReducers runs the remote command on every reducer machine.
 func (m *Master) startReducers() error {
-	for i, reducer := range m.config.Reducers {
+	for i, v := range m.config.Reducers {
+		reducer := strings.Split(v, ":")[0]
 		args := fmt.Sprintf(
 			"-mode reduce -master %s",
 			m.config.Master,
 		)
 		id := "reducer-" + strconv.Itoa(i)
+		logger.Printf("Remote %s: running command %q on %q", id, args, reducer)
 		cmd, err := util.RunMeRemote(id, reducer, args)
 		if err != nil {
 			return err
@@ -188,7 +192,8 @@ func (m *Master) startReducers() error {
 
 // startMappers runs the remote command on every mapper machine.
 func (m *Master) startMappers() error {
-	for i, mapper := range m.config.Mappers {
+	for i, v := range m.config.Mappers {
+		mapper := strings.Split(v, ":")[0]
 		args := fmt.Sprintf(
 			"-mode map -master %s",
 			m.config.Master,

@@ -7,8 +7,8 @@ import (
 	"github.com/amsibamsi/knausrig"
 )
 
-func words(part int64, out chan<- [2]string) error {
-	for i := 0; int64(i) <= part; i++ {
+func words(part int, out chan<- [2]string) error {
+	for i := 0; i <= part; i++ {
 		for j := 0; j < i+2; j++ {
 			out <- [2]string{
 				fmt.Sprintf("word-%d", i),
@@ -37,7 +37,7 @@ func output(result map[string]string) error {
 }
 
 func main() {
-	mr := knausrig.MapReduce{
+	mr := knausrig.Job{
 		MapFn:    words,
 		ReduceFn: count,
 		OutputFn: output,

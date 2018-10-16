@@ -67,7 +67,7 @@ func (j *Job) Main() {
 		err = reducer.NewReducer(
 			*listenAddr,
 			*masterAddr,
-			*j.ReduceFn,
+			j.ReduceFn,
 		).Run()
 		if err != nil {
 			log.Fatal(err)

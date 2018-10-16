@@ -2,11 +2,13 @@
 package mapper
 
 import (
+	"errors"
 	"hash/fnv"
 	"log"
 	"net"
 	"net/rpc"
 	"os"
+	"time"
 
 	"github.com/amsibamsi/knausrig/mapreduce"
 	"github.com/amsibamsi/knausrig/msg"
@@ -46,31 +48,15 @@ func (m *Mapper) connectMaster() error {
 	return nil
 }
 
-// shuffle sends the output from mapping to the right reducers.
-//func (m *Mapper) shuffle() error {
-//	for e := range m.output {
-//		h := fnv.New64a()
-//		h.Write([]byte(e[0]))
-//		hi := h.Sum64()
-//		p := int(hi % uint64(len(m.reducers)))
-//		client, err := m.reducerClients.Client(m.reducers[p])
-//		if err != nil {
-//			return err
-//		}
-//		if err := client.Call("Service.Element", &e, msg.Empty); err != nil {
-//			return err
-//		}
-//	}
-//	return nil
-//}
-
-//
-func (m *Mapper) mapShuffle(errors chan<- struct{}) {
+// mapShuffle starts the mapping/shuffling tasks in the background. The error
+// channel will be closed without messages if there is no errors. Otherwise
+// there will be events in it with value != 0.
+func (m *Mapper) mapShuffle(errs chan<- int) {
 	out := make(chan [2]string, 10)
 	// Input and map
 	go func() {
 		if err := m.mapFn(m.partition, out); err != nil {
-			errors <- struct{}{}
+			errs <- 1
 			return
 		}
 		close(out)
@@ -84,20 +70,21 @@ func (m *Mapper) mapShuffle(errors chan<- struct{}) {
 			p := int(hi % uint64(len(m.reducers)))
 			client, err := m.reducerClients.Client(m.reducers[p])
 			if err != nil {
-				errors <- struct{}{}
+				errs <- 1
 				return
 			}
 			if err := client.Call("Service.Element", &e, msg.Empty); err != nil {
-				errors <- struct{}{}
+				errs <- 1
 				return
 			}
 		}
-		close(errors)
+		close(errs)
 	}()
 }
 
-// Run registers the mapper with the master, getting its partition info, and starts reading data, mapping, and sending the results to the reducers.
-func (m *Mapper) Run(masterAddrs string) error {
+// Run registers the mapper with the master, getting its partition info, and
+// starts reading data, mapping, and sending the results to the reducers.
+func (m *Mapper) Run() error {
 	if err := m.connectMaster(); err != nil {
 		return err
 	}
@@ -110,13 +97,15 @@ func (m *Mapper) Run(masterAddrs string) error {
 	m.partition = info.Partition
 	logger.Printf("Got partition %d", m.partition)
 	logger.Print("Starting to map and shuffle data")
-	errors := make(chan struct{})
-	m.mapShuffle(errors)
-	// TODO: catch errors
+	errs := make(chan int)
+	m.mapShuffle(errs)
 	select {
-	case <-errors:
-		return errors.New("Aborting due to failures")
-	case <-time.After(time.Hours):
+	case e := <-errs:
+		if e != 0 {
+			return errors.New("Aborting due to failures")
+		}
+	case <-time.After(time.Hour):
+		return errors.New("Map/shuffle timed out")
 	}
 	if err := m.masterClient.Call("Service.MapperFinished", msg.Empty, msg.Empty); err != nil {
 		return err
