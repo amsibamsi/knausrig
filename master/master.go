@@ -54,7 +54,7 @@ func (s *Service) NewReducer(addr *string, _ *msg.EmptyMsg) error {
 	}
 	s.m.reducerMap[p] = *addr
 	s.m.staging <- struct{}{}
-	logger.Printf("New reducer %q for partition %q", *addr, p)
+	logger.Printf("New reducer %q for partition %d", *addr, p)
 	return nil
 }
 
@@ -71,7 +71,7 @@ func (s *Service) NewMapper(_ *msg.EmptyMsg, mapInfo *msg.MapperInfo) error {
 	mapInfo.Partition = p
 	mapInfo.Reducers = s.m.reducerMap
 	s.m.staging <- struct{}{}
-	logger.Printf("New mapper for partition %q", p)
+	logger.Printf("New mapper for partition %d", p)
 	return nil
 }
 
@@ -119,7 +119,6 @@ type Master struct {
 // NewMaster ...
 func NewMaster(outputFn mapreduce.OutputFn) (*Master, error) {
 	cfg, err := cfg.FromFile(*config)
-	logger.Printf("config: %+v", *cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +164,6 @@ func (m *Master) watchCmd(id string, cmd *exec.Cmd) {
 	err := cmd.Wait()
 	if err != nil {
 		logger.Printf("Remote command on %s failed: %v", id, err)
-
 		m.fail <- struct{}{}
 	}
 }
@@ -175,11 +173,12 @@ func (m *Master) startReducers() error {
 	for i, v := range m.config.Reducers {
 		reducer := strings.Split(v, ":")[0]
 		args := fmt.Sprintf(
-			"-mode reduce -master %s",
+			"-mode reduce -listen %s -master %s",
+			v,
 			m.config.Master,
 		)
 		id := "reducer-" + strconv.Itoa(i)
-		logger.Printf("Remote %s: running command %q on %q", id, args, reducer)
+		logger.Printf("Remote %s: running on %q with args %q", id, reducer, args)
 		cmd, err := util.RunMeRemote(id, reducer, args)
 		if err != nil {
 			return err
@@ -199,6 +198,7 @@ func (m *Master) startMappers() error {
 			m.config.Master,
 		)
 		id := "mapper-" + strconv.Itoa(i)
+		logger.Printf("Remote %s: running on %q with args %q", id, mapper, args)
 		cmd, err := util.RunMeRemote(id, mapper, args)
 		if err != nil {
 			return err

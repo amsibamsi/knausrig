@@ -8,14 +8,8 @@ import (
 )
 
 func words(part int, out chan<- [2]string) error {
-	for i := 0; i <= part; i++ {
-		for j := 0; j < i+2; j++ {
-			out <- [2]string{
-				fmt.Sprintf("word-%d", i),
-				"1",
-			}
-		}
-	}
+	out <- [2]string{"abc", "3"}
+	out <- [2]string{"def", "2"}
 	return nil
 }
 

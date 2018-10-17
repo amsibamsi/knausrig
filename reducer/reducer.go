@@ -136,7 +136,7 @@ func (r *Reducer) Run() error {
 		return err
 	}
 	logger.Print("Connected to master")
-	addr := r.listener.Addr().String()
+	addr := r.listen
 	// Register at master
 	if err := r.client.Call("Service.NewReducer", &addr, msg.Empty); err != nil {
 		return err

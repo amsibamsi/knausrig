@@ -82,10 +82,10 @@ func RunMeRemote(id, dst, args string) (*exec.Cmd, error) {
 		return nil, err
 	}
 	go func() {
-		logger := log.New(os.Stderr, "["+id+"] ", 0)
+		logger := log.New(os.Stderr, "["+id+"] ", log.LstdFlags)
 		scan := bufio.NewScanner(stdout)
 		for scan.Scan() {
-			logger.Printf("%s: %s", id, scan.Text())
+			logger.Print(scan.Text())
 		}
 		if err := scan.Err(); err != nil {
 			logger.Printf("%s: Error reading output: %s", id, err)
@@ -96,16 +96,15 @@ func RunMeRemote(id, dst, args string) (*exec.Cmd, error) {
 		return nil, err
 	}
 	go func() {
-		logger := log.New(os.Stderr, "["+id+"] ", 0)
+		logger := log.New(os.Stderr, "["+id+"] ", log.LstdFlags)
 		scan := bufio.NewScanner(stderr)
 		for scan.Scan() {
-			logger.Printf("%s: %s", id, scan.Text())
+			logger.Print(scan.Text())
 		}
 		if err := scan.Err(); err != nil {
 			logger.Printf("%s: Error reading error output: %s", id, err)
 		}
 	}()
-	log.Printf("Remote %s: running command: %q", id, cmd.Args)
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
