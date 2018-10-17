@@ -10,6 +10,7 @@ import (
 func words(part int, out chan<- [2]string) error {
 	out <- [2]string{"abc", "3"}
 	out <- [2]string{"def", "2"}
+	out <- [2]string{"abc", "1"}
 	return nil
 }
 

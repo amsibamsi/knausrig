@@ -77,6 +77,7 @@ func (m *Mapper) mapShuffle(errs chan<- int) {
 				errs <- 1
 				return
 			}
+			logger.Printf("Sent element with key %q and value %q to reducer %d", e[0], e[1], p)
 		}
 		close(errs)
 	}()

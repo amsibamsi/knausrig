@@ -128,7 +128,7 @@ func NewMaster(outputFn mapreduce.OutputFn) (*Master, error) {
 		reducerMap:     make(map[int]string),
 		output:         make(map[string]string),
 		outputFn:       outputFn,
-		remoteCmds:     make([]*exec.Cmd, 1),
+		remoteCmds:     make([]*exec.Cmd, 0),
 		fail:           make(chan struct{}),
 		staging:        make(chan struct{}),
 		reducerClients: util.NewRPCClients(),
@@ -165,6 +165,26 @@ func (m *Master) watchCmd(id string, cmd *exec.Cmd) {
 	if err != nil {
 		logger.Printf("Remote command on %s failed: %v", id, err)
 		m.fail <- struct{}{}
+	}
+}
+
+// waitRemotes waits for all remote commands to finish and reports to staging.
+func (m *Master) waitRemotes() {
+	go func() {
+		for _, cmd := range m.remoteCmds {
+			if cmd != nil {
+				cmd.Wait()
+				m.staging <- struct{}{}
+			}
+		}
+	}()
+	for c := len(m.remoteCmds); c > 0; {
+		select {
+		case <-m.staging:
+			c--
+		case <-time.After(10 * time.Second):
+			break
+		}
 	}
 }
 
@@ -228,6 +248,7 @@ func (m *Master) startReducing() error {
 // Run starts up the listener, starts reducers/mappers, runs the different
 // stages of the MapReduce process, and outputs the final result.
 func (m *Master) Run() error {
+	defer m.waitRemotes()
 	numReducers := len(m.config.Reducers)
 	numMappers := len(m.config.Mappers)
 	logger.Printf(
@@ -250,7 +271,7 @@ func (m *Master) Run() error {
 			return errors.New("Aborting due to failures")
 		case <-m.staging:
 			c--
-		case <-time.After(60 * time.Second):
+		case <-time.After(time.Minute):
 			return errors.New(
 				"Timed out waiting for reducers to register",
 			)
@@ -270,7 +291,7 @@ func (m *Master) Run() error {
 			return errors.New("Aborting due to failures")
 		case <-m.staging:
 			c--
-		case <-time.After(3600 * time.Second):
+		case <-time.After(time.Hour):
 			return errors.New(
 				"Timed out waiting for mappers to finish",
 			)
@@ -289,7 +310,7 @@ func (m *Master) Run() error {
 			return errors.New("Aborting due to failures")
 		case <-m.staging:
 			c--
-		case <-time.After(3600 * time.Second):
+		case <-time.After(time.Hour):
 			return errors.New(
 				"Timed out waiting for reducers to register",
 			)
