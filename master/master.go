@@ -4,7 +4,6 @@ package master
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -23,11 +22,6 @@ import (
 )
 
 var (
-	config = flag.String(
-		"config",
-		"./config.json",
-		"Configuration file for master (modes: master)",
-	)
 	logger = log.New(os.Stderr, "[master] ", log.LstdFlags)
 )
 
@@ -114,16 +108,14 @@ type Master struct {
 	staging           chan struct{}
 	reducerClients    *util.RPCClients
 	registeredMappers int
+	tasks             *sync.WaitGroup
+	events            chan int
 }
 
 // NewMaster ...
-func NewMaster(outputFn mapreduce.OutputFn) (*Master, error) {
-	cfg, err := cfg.FromFile(*config)
-	if err != nil {
-		return nil, err
-	}
+func NewMaster(config *cfg.Config, outputFn mapreduce.OutputFn) (*Master, error) {
 	m := Master{
-		config:         cfg,
+		config:         config,
 		lock:           &sync.Mutex{},
 		reducerMap:     make(map[int]string),
 		output:         make(map[string]string),
@@ -132,6 +124,8 @@ func NewMaster(outputFn mapreduce.OutputFn) (*Master, error) {
 		fail:           make(chan struct{}),
 		staging:        make(chan struct{}),
 		reducerClients: util.NewRPCClients(),
+		tasks:          &sync.WaitGroup{},
+		events:         make(chan int, 10),
 	}
 	m.service = NewService(&m)
 	return &m, nil
@@ -146,16 +140,22 @@ func (m *Master) serve() error {
 	}
 	m.rpcServer = rpc.NewServer()
 	m.rpcServer.Register(m.service)
-	go func(m *Master) {
+	m.tasks.Add(1)
+	go func() {
+		defer m.tasks.Done()
 		for {
 			conn, err := m.listener.Accept()
 			if err != nil {
 				logger.Printf("Failed to accept RPC connection: %v", err)
 				continue
 			}
-			go m.rpcServer.ServeConn(conn)
+			m.tasks.Add(1)
+			go func() {
+				defer m.tasks.Done()
+				m.rpcServer.ServeConn(conn)
+			}()
 		}
-	}(m)
+	}()
 	return nil
 }
 

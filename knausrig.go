@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/amsibamsi/knausrig/cfg"
 	"github.com/amsibamsi/knausrig/mapper"
 	"github.com/amsibamsi/knausrig/mapreduce"
 	"github.com/amsibamsi/knausrig/master"
@@ -20,6 +21,11 @@ var (
 		"mode",
 		"master",
 		"Exactly one of 'master', 'map', 'reduce'",
+	)
+	config = flag.String(
+		"config",
+		"./config.json",
+		"Configuration file for master (modes: master)",
 	)
 	masterAddr = flag.String(
 		"master",
@@ -50,7 +56,11 @@ func (j *Job) Main() {
 	flag.Parse()
 	switch *mode {
 	case "master":
-		master, err := master.NewMaster(j.OutputFn)
+		config, err := cfg.FromFile(*config)
+		if err != nil {
+			log.Fatal(err)
+		}
+		master, err := master.NewMaster(config, j.OutputFn)
 		if err != nil {
 			log.Fatal(err)
 		}
