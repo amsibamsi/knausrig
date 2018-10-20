@@ -3,8 +3,10 @@
 package master
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/rpc"
@@ -34,6 +36,11 @@ type Service struct {
 // NewService returns a new service for the given master.
 func NewService(m *Master) *Service {
 	return &Service{m: m}
+}
+
+// Ping tests connectivity.
+func (s *Service) Ping(_ *msg.EmptyMsg, _ *msg.EmptyMsg) error {
+	return nil
 }
 
 // NewReducer registers a reducer with the specified <address>:<port>.
@@ -113,7 +120,7 @@ type Master struct {
 }
 
 // NewMaster ...
-func NewMaster(config *cfg.Config, outputFn mapreduce.OutputFn) (*Master, error) {
+func NewMaster(config *cfg.Config, outputFn mapreduce.OutputFn) *Master {
 	m := Master{
 		config:         config,
 		lock:           &sync.Mutex{},
@@ -125,10 +132,97 @@ func NewMaster(config *cfg.Config, outputFn mapreduce.OutputFn) (*Master, error)
 		staging:        make(chan struct{}),
 		reducerClients: util.NewRPCClients(),
 		tasks:          &sync.WaitGroup{},
-		events:         make(chan int, 10),
+		events:         make(chan int, 1),
 	}
 	m.service = NewService(&m)
-	return &m, nil
+	for i, r := range config.Reducers {
+		m.reducerMap[i] = r
+	}
+	return &m
+}
+
+const (
+	// remoteRunTmpl is template to use for running current executable over SSH
+	// remotely. Should be expaned with Printf to add arguments for binary
+	// executed remotely.
+	//
+	// Note: Carefully construct shell command in a way that the temp binary is
+	// cleaned up, even if the executions fails.
+	remoteRunTmpl = `sh -c 'bin=$(mktemp) && cat - > $bin && chmod +x $bin` +
+		` && $bin %s; rm $bin'`
+)
+
+// runMeRemote copies the binary of the current process to a remote destination
+// and tries to execute it there via SSH. The supplied args are passed to the
+// executable when it's run remotely. The binary is copied to a temp file on
+// the remote host, and removed again after execution. The dst argument can be
+// any valid destination understood by the 'ssh' client executable.
+// Does not wait for the command to finish, returns the command.
+func (m *Master) runMeRemote(id, dst, args string) error {
+	logger.Printf("Starting remote %q on %q with args %q", id, dst, args)
+	cmd := exec.Command("ssh", dst, fmt.Sprintf(remoteRunTmpl, args))
+	exeFilename, err := os.Executable()
+	exe, err := os.Open(exeFilename)
+	if err != nil {
+		return err
+	}
+	defer exe.Close()
+	remoteLog := log.New(os.Stderr, "["+id+"] ", 0)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	// Background stdout logging
+	m.tasks.Add(1)
+	go func() {
+		defer m.tasks.Done()
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			remoteLog.Print(scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			remoteLog.Printf("Error reading output: %v", err)
+		}
+	}()
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+	// Background stderr logging
+	m.tasks.Add(1)
+	go func() {
+		defer m.tasks.Done()
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			remoteLog.Print(scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			remoteLog.Printf("Error reading error output: %v", err)
+		}
+	}()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if _, err := io.Copy(stdin, exe); err != nil {
+		return err
+	}
+	stdin.Close()
+	// Monitor cmd in background and report final result
+	m.tasks.Add(1)
+	go func() {
+		defer m.tasks.Done()
+		err := cmd.Wait()
+		if err != nil {
+			remoteLog.Printf("Failed: %v", err)
+		} else {
+			remoteLog.Print("Finished")
+		}
+	}()
+	return nil
 }
 
 // serve creates a listener, and accepts and serves new network connections.
@@ -159,72 +253,42 @@ func (m *Master) serve() error {
 	return nil
 }
 
-// watchCmd waits on a command and reports if the command fails.
-func (m *Master) watchCmd(id string, cmd *exec.Cmd) {
-	err := cmd.Wait()
-	if err != nil {
-		logger.Printf("Remote command on %s failed: %v", id, err)
-		m.fail <- struct{}{}
-	}
-}
-
-// waitRemotes waits for all remote commands to finish and reports to staging.
-func (m *Master) waitRemotes() {
-	go func() {
-		for _, cmd := range m.remoteCmds {
-			if cmd != nil {
-				cmd.Wait()
-				m.staging <- struct{}{}
-			}
-		}
-	}()
-	for c := len(m.remoteCmds); c > 0; {
-		select {
-		case <-m.staging:
-			c--
-		case <-time.After(10 * time.Second):
-			break
-		}
-	}
-}
-
-// startReducers runs the remote command on every reducer machine.
+// startReducers starts up all reducers via SSH.
 func (m *Master) startReducers() error {
 	for i, v := range m.config.Reducers {
-		reducer := strings.Split(v, ":")[0]
+		dest := strings.Split(v, ":")[0]
 		args := fmt.Sprintf(
 			"-mode reduce -listen %s -master %s",
 			v,
 			m.config.Master,
 		)
 		id := "reducer-" + strconv.Itoa(i)
-		logger.Printf("Remote %s: running on %q with args %q", id, reducer, args)
-		cmd, err := util.RunMeRemote(id, reducer, args)
+		cmd, err := util.RunMeRemote(id, dest, args)
 		if err != nil {
 			return err
 		}
 		m.remoteCmds = append(m.remoteCmds, cmd)
-		go m.watchCmd(id, cmd)
 	}
 	return nil
 }
 
-// startMappers runs the remote command on every mapper machine.
+// startMappers starts up all mappers via SSH.
 func (m *Master) startMappers() error {
+	numMappers := len(m.config.Mappers)
 	for i, v := range m.config.Mappers {
-		mapper := strings.Split(v, ":")[0]
+		dest := strings.Split(v, ":")[0]
 		args := fmt.Sprintf(
-			"-mode map -master %s",
+			"-mode map -part %d -numPart %d -master %s",
+			i,
+			numMappers,
 			m.config.Master,
 		)
 		id := "mapper-" + strconv.Itoa(i)
-		logger.Printf("Remote %s: running on %q with args %q", id, mapper, args)
-		cmd, err := util.RunMeRemote(id, mapper, args)
+		cmd, err := util.RunMeRemote(id, dest, args)
 		if err != nil {
 			return err
 		}
 		m.remoteCmds = append(m.remoteCmds, cmd)
-		go m.watchCmd(id, cmd)
 	}
 	return nil
 }
@@ -245,10 +309,8 @@ func (m *Master) startReducing() error {
 	return nil
 }
 
-// Run starts up the listener, starts reducers/mappers, runs the different
-// stages of the MapReduce process, and outputs the final result.
+// Run steps through the MapReduce job, controlling its execution.
 func (m *Master) Run() error {
-	defer m.waitRemotes()
 	numReducers := len(m.config.Reducers)
 	numMappers := len(m.config.Mappers)
 	logger.Printf(
@@ -260,10 +322,18 @@ func (m *Master) Run() error {
 		return err
 	}
 	logger.Printf("Serving on %q", m.listener.Addr())
+	// TODO: start output goroutine
 	if err := m.startReducers(); err != nil {
 		return err
 	}
 	logger.Print("All reducers started")
+	reducersStarted := 0
+	reducersStopped := 0
+	for {
+		select {
+			case 
+		}
+	}
 	// Wait for all reducers to register
 	for c := numReducers; c > 0; {
 		select {

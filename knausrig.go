@@ -33,6 +33,18 @@ var (
 		"<address>:<port> of master server"+
 			" (required; modes: map, reduce)",
 	)
+	part = flag.String(
+		"part",
+		"",
+		"Partition assigned to this mapper/reducer"+
+			" (required; modes: map, reduce)",
+	)
+	numPart = flag.String(
+		"numPart",
+		"",
+		"Number of partitions (number of mappers)"+
+			" (required; modes: map)",
+	)
 	listenAddr = flag.String(
 		"listen",
 		"",
@@ -69,7 +81,12 @@ func (j *Job) Main() {
 			log.Fatal(err)
 		}
 	case "map":
-		err = mapper.NewMapper(*masterAddr, j.MapFn).Run()
+		err = mapper.NewMapper(
+			*part,
+			*numPart,
+			*masterAddr,
+			j.MapFn,
+		).Run()
 		if err != nil {
 			log.Fatal(err)
 		}

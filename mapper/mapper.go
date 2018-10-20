@@ -1,4 +1,4 @@
-// Package mapper contains the mapper task of a MapReduce job.
+// Package mapper runs the map task of a MapReduce job.
 package mapper
 
 import (
@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/rpc"
 	"os"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/amsibamsi/knausrig/mapreduce"
@@ -15,30 +17,33 @@ import (
 	"github.com/amsibamsi/knausrig/util"
 )
 
-var (
-	logger = log.New(os.Stderr, "", 0)
-)
-
-// Mapper is the service to input and map data in the first place.
+// A mapper reads input data and applies the user-defined mapping to it.
 type Mapper struct {
+	part           int
+	numPart        int
+	log            *log.Logger
 	master         string
 	mapFn          mapreduce.MapFn
 	masterClient   *rpc.Client
 	reducers       map[int]string
-	partition      int
 	reducerClients *util.RPCClients
+	tasks          *sync.WaitGroup
 }
 
 // NewMapper returns a new mapper.
-func NewMapper(master string, mapFn mapreduce.MapFn) *Mapper {
+func NewMapper(part, numPart int, master string, mapFn mapreduce.MapFn) *Mapper {
+	id := "[mapper-" + strconv.Itoa(part) + "]"
 	return &Mapper{
+		part:           part,
+		numPart:        numPart,
+		log:            log.New(os.Stderr, id, log.LstdFlags),
 		master:         master,
 		mapFn:          mapFn,
 		reducerClients: util.NewRPCClients(),
+		tasks:          &sync.WaitGroup{},
 	}
 }
 
-// connectMaster creates RPC client and connects it to the master.
 func (m *Mapper) connectMaster() error {
 	conn, err := net.Dial("tcp", m.master)
 	if err != nil {
@@ -77,7 +82,7 @@ func (m *Mapper) mapShuffle(errs chan<- int) {
 				errs <- 1
 				return
 			}
-			logger.Printf("Sent element with key %q and value %q to reducer %d", e[0], e[1], p)
+			m.log.Printf("Sent element with key %q and value %q to reducer %d", e[0], e[1], p)
 		}
 		close(errs)
 	}()
@@ -89,15 +94,15 @@ func (m *Mapper) Run() error {
 	if err := m.connectMaster(); err != nil {
 		return err
 	}
-	logger.Print("Connected to master")
+	m.log.Print("Connected to master")
 	info := new(msg.MapperInfo)
 	if err := m.masterClient.Call("Service.NewMapper", msg.Empty, info); err != nil {
 		return err
 	}
 	m.reducers = info.Reducers
 	m.partition = info.Partition
-	logger.Printf("Got partition %d", m.partition)
-	logger.Print("Starting to map and shuffle data")
+	m.log.Printf("Got partition %d", m.partition)
+	m.log.Print("Starting to map and shuffle data")
 	errs := make(chan int)
 	m.mapShuffle(errs)
 	select {
@@ -111,6 +116,6 @@ func (m *Mapper) Run() error {
 	if err := m.masterClient.Call("Service.MapperFinished", msg.Empty, msg.Empty); err != nil {
 		return err
 	}
-	logger.Print("Finished")
+	m.log.Print("Finished")
 	return nil
 }
