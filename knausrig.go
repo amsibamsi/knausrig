@@ -33,15 +33,15 @@ var (
 		"<address>:<port> of master server"+
 			" (required; modes: map, reduce)",
 	)
-	part = flag.String(
+	part = flag.Int(
 		"part",
-		"",
+		0,
 		"Partition assigned to this mapper/reducer"+
 			" (required; modes: map, reduce)",
 	)
-	numPart = flag.String(
+	numPart = flag.Int(
 		"numPart",
-		"",
+		0,
 		"Number of partitions (number of mappers)"+
 			" (required; modes: map)",
 	)
@@ -64,7 +64,6 @@ type Job struct {
 // Main evaluates the evaluates the mode and either starts a new job, or a new
 // mapper/reducer.
 func (j *Job) Main() {
-	var err error
 	flag.Parse()
 	switch *mode {
 	case "master":
@@ -72,33 +71,23 @@ func (j *Job) Main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		master, err := master.NewMaster(config, j.OutputFn)
-		if err != nil {
-			log.Fatal(err)
-		}
-		err = master.Run()
-		if err != nil {
-			log.Fatal(err)
-		}
+		master.NewMaster(
+			config,
+			j.OutputFn,
+		).Main()
 	case "map":
-		err = mapper.NewMapper(
+		mapper.NewMapper(
 			*part,
 			*numPart,
 			*masterAddr,
 			j.MapFn,
-		).Run()
-		if err != nil {
-			log.Fatal(err)
-		}
+		).Main()
 	case "reduce":
-		err = reducer.NewReducer(
+		reducer.NewReducer(
 			*listenAddr,
 			*masterAddr,
 			j.ReduceFn,
-		).Run()
-		if err != nil {
-			log.Fatal(err)
-		}
+		).Main()
 	default:
 		log.Fatal(fmt.Errorf("Unknown mode: %q", *mode))
 	}

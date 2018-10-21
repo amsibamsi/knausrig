@@ -2,77 +2,65 @@
 package reducer
 
 import (
-	"errors"
 	"log"
 	"net"
 	"net/rpc"
-	"os"
 	"sync"
-	"time"
+	"sync/atomic"
 
 	"github.com/amsibamsi/knausrig/mapreduce"
 	"github.com/amsibamsi/knausrig/msg"
 )
 
-var (
-	logger = log.New(os.Stderr, "", 0)
+const (
+	chanSize = 10
 )
 
-// Service holds the RPC service exposed to other MapReduce processes. All
-// exported methods on this struct are considered for exposing via RPC.
+// Service holds the methods to expose to mappers and the master nvia net/rpc
+// package.
 type Service struct {
 	r *Reducer
 }
 
-// NewService returns a new service for the given reducer.
-func NewService(r *Reducer) *Service {
-	return &Service{r}
-}
-
 // Element receives a data element from mappers.
 func (s *Service) Element(e [2]string, _ *msg.EmptyMsg) error {
-	s.r.lock.Lock()
-	defer s.r.lock.Unlock()
-	if _, ok := s.r.elements[e[0]]; !ok {
-		s.r.elements[e[0]] = make([]string, 0)
-	}
-	s.r.elements[e[0]] = append(s.r.elements[e[0]], e[1])
+	s.r.input <- e
+	atomic.AddUint64(&s.r.inputCount, 1)
 	return nil
 }
 
-// Reduce signals starting to reduce, after all data from mappers has been received.
-func (s *Service) Reduce(_ *msg.EmptyMsg, _ *msg.EmptyMsg) error {
-	s.r.staging <- struct{}{}
+// Finish signals the reducer that all data from mappers has been sent and the
+// reducer should finish up.
+func (s *Service) Finish(_ *msg.EmptyMsg, _ *msg.EmptyMsg) error {
+	close(s.r.input)
 	return nil
 }
 
 // Reducer is the service to receive keyed data from mappers and reduce it per
 // key.
 type Reducer struct {
-	service   *Service
-	master    string
-	listen    string
-	reduceFn  mapreduce.ReduceFn
-	listener  net.Listener
-	rpcServer *rpc.Server
-	server    *rpc.Server
-	client    *rpc.Client
-	elements  map[string][]string
-	lock      *sync.Mutex
-	staging   chan struct{}
+	listen       string
+	service      *Service
+	listener     net.Listener
+	rpcServer    *rpc.Server
+	master       string
+	masterClient *rpc.Client
+	reduceFn     mapreduce.ReduceFn
+	input        chan [2]string
+	inputCount   uint64
+	tasks        *sync.WaitGroup
 }
 
 // NewReducer returns a new reducer.
 func NewReducer(listen, master string, reduceFn mapreduce.ReduceFn) *Reducer {
 	r := Reducer{
-		master:   master,
 		listen:   listen,
+		master:   master,
 		reduceFn: reduceFn,
-		elements: make(map[string][]string),
-		lock:     &sync.Mutex{},
-		staging:  make(chan struct{}),
+		input:    make(chan [2]string, chanSize),
+		tasks:    &sync.WaitGroup{},
 	}
-	r.service = NewService(&r)
+	r.service = &Service{&r}
 	return &r
 }
 
@@ -85,16 +73,23 @@ func (r *Reducer) serve() error {
 	}
 	r.rpcServer = rpc.NewServer()
 	r.rpcServer.Register(r.service)
-	go func(r *Reducer) {
+	r.tasks.Add(1)
+	go func() {
+		defer r.tasks.Done()
 		for {
 			conn, err := r.listener.Accept()
 			if err != nil {
-				logger.Printf("Failed to accept RPC connection: %v", err)
+				log.Printf("Failed to accept RPC connection: %v", err)
 				continue
 			}
-			go r.rpcServer.ServeConn(conn)
+			r.tasks.Add(1)
+			go func() {
+				defer r.tasks.Done()
+				r.rpcServer.ServeConn(conn)
+			}()
 		}
-	}(r)
+	}()
+	log.Printf("Serving on %q", r.listener.Addr())
 	return nil
 }
 
@@ -104,24 +99,34 @@ func (r *Reducer) connectMaster() error {
 	if err != nil {
 		return err
 	}
-	r.client = rpc.NewClient(conn)
+	r.masterClient = rpc.NewClient(conn)
+	log.Print("Connected to master")
 	return nil
 }
 
-// reduce reduces all the data received per key, and sends it to the master.
+// reduce starts the custom reduce function
 func (r *Reducer) reduce() error {
-	out := make(map[string]string)
-	for k, v := range r.elements {
-		logger.Printf("Reducing key %q with %d elements", k, len(v))
-		e, err := r.reduceFn(k, v)
-		if err != nil {
-			return err
+	output := make(chan [2]string, chanSize)
+	r.tasks.Add(1)
+	go func() {
+		defer r.tasks.Done()
+		if err := r.reduceFn(r.input, output); err != nil {
+			log.Print(err)
 		}
-		out[k] = e
-	}
-	if err := r.client.Call("Service.Output", &out, msg.Empty); err != nil {
-		return err
-	}
+		close(output)
+	}()
+	outCount := 0
+	r.tasks.Add(1)
+	go func() {
+		defer r.tasks.Done()
+		for e := range output {
+			outCount++
+			if err := r.masterClient.Call("Service.Output", e, msg.Empty); err != nil {
+				log.Print(err)
+			}
+		}
+	}()
+	log.Printf("Received %d elements, sent %d elements", r.inputCount, outCount)
 	return nil
 }
 
@@ -131,30 +136,30 @@ func (r *Reducer) Run() error {
 	if err := r.serve(); err != nil {
 		return err
 	}
-	logger.Printf("Serving on %q", r.listener.Addr())
 	if err := r.connectMaster(); err != nil {
 		return err
 	}
-	logger.Print("Connected to master")
-	addr := r.listen
-	// Register at master
-	if err := r.client.Call("Service.NewReducer", &addr, msg.Empty); err != nil {
+	if err := r.masterClient.Call("Service.ReducerStart", msg.Empty, msg.Empty); err != nil {
 		return err
 	}
-	logger.Print("Registered at master")
-	// Wait ok from master to reduce (after all mappers have finished)
-	select {
-	case <-r.staging:
-	case <-time.After(3600 * time.Second):
-		return errors.New("Waiting for mappers timed out")
-	}
-	// Reduce the data
+	log.Print("Registered at master")
 	if err := r.reduce(); err != nil {
 		return err
 	}
-	if err := r.client.Call("Service.ReducerFinished", msg.Empty, msg.Empty); err != nil {
+	if err := r.masterClient.Call("Service.ReducerStop", msg.Empty, msg.Empty); err != nil {
 		return err
 	}
-	logger.Print("Finished")
+	if err := r.listener.Close(); err != nil {
+		return err
+	}
+	r.tasks.Wait()
+	log.Print("Finished")
 	return nil
+}
+
+// Main runs the reducer and logs any error.
+func (r *Reducer) Main() {
+	if err := r.Run(); err != nil {
+		log.Fatal(err)
+	}
 }

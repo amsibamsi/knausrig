@@ -7,27 +7,36 @@ import (
 	"github.com/amsibamsi/knausrig"
 )
 
-func words(part int, out chan<- [2]string) error {
+func words(part, numPart int, out chan<- [2]string) error {
 	out <- [2]string{"abc", "3"}
 	out <- [2]string{"def", "2"}
 	out <- [2]string{"abc", "1"}
 	return nil
 }
 
-func count(_ string, elements []string) (string, error) {
-	sum := 0
-	for _, e := range elements {
-		i, err := strconv.Atoi(e)
+func count(in <-chan [2]string, out chan<- [2]string) error {
+	sums := make(map[string]int)
+	for e := range in {
+		word := e[0]
+		amount, err := strconv.Atoi(e[1])
 		if err != nil {
-			return "", err
+			return err
 		}
-		sum = sum + i
+		sums[word] = sums[word] + amount
 	}
-	return strconv.Itoa(sum), nil
+	for k, v := range sums {
+		out <- [2]string{
+			k,
+			strconv.Itoa(v),
+		}
+	}
+	return nil
 }
 
-func output(result map[string]string) error {
-	fmt.Printf("Result: $%v\n", result)
+func output(result <-chan [2]string) error {
+	for r := range result {
+		fmt.Printf("%s: %s\n", r[0], r[1])
+	}
 	return nil
 }
 
