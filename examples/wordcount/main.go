@@ -7,37 +7,42 @@ import (
 	"github.com/amsibamsi/knausrig"
 )
 
-func words(part int64, out chan<- [2]string) error {
-	for i := 0; int64(i) <= part; i++ {
-		for j := 0; j < i+2; j++ {
-			out <- [2]string{
-				fmt.Sprintf("word-%d", i),
-				"1",
-			}
+func words(part, numPart int, out chan<- [2]string) error {
+	for i := 0; i < 1e3; i++ {
+		out <- [2]string{"word1", "1"}
+		out <- [2]string{"word2", "2"}
+	}
+	return nil
+}
+
+func count(in <-chan [2]string, out chan<- [2]string) error {
+	sums := make(map[string]int)
+	for e := range in {
+		word := e[0]
+		amount, err := strconv.Atoi(e[1])
+		if err != nil {
+			return err
+		}
+		sums[word] = sums[word] + amount
+	}
+	for k, v := range sums {
+		out <- [2]string{
+			k,
+			strconv.Itoa(v),
 		}
 	}
 	return nil
 }
 
-func count(_ string, elements []string) (string, error) {
-	sum := 0
-	for _, e := range elements {
-		i, err := strconv.Atoi(e)
-		if err != nil {
-			return "", err
-		}
-		sum = sum + i
+func output(result <-chan [2]string) error {
+	for r := range result {
+		fmt.Printf("%s: %s\n", r[0], r[1])
 	}
-	return strconv.Itoa(sum), nil
-}
-
-func output(result map[string]string) error {
-	fmt.Printf("Result: $%v\n", result)
 	return nil
 }
 
 func main() {
-	mr := knausrig.MapReduce{
+	mr := knausrig.Job{
 		MapFn:    words,
 		ReduceFn: count,
 		OutputFn: output,

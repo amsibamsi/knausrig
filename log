@@ -1,0 +1,29 @@
+[master] 2018/10/22 10:37:40 Running MapReduce with 1 mappers and 1 reducers
+[master] 2018/10/22 10:37:40 Serving on "127.0.0.1:5000"
+[master] 2018/10/22 10:37:40 Starting remote "reducer-0" on "localhost" with args "-mode reduce -listen localhost:5002 -master localhost:5000"
+[reducer-0] 2018/10/22 10:37:40 Serving on "127.0.0.1:5002"
+[reducer-0] 2018/10/22 10:37:40 Connected to master
+[master] 2018/10/22 10:37:40 Reducer started
+[master] 2018/10/22 10:37:40 All reducers ready, starting mappers
+[master] 2018/10/22 10:37:40 Starting remote "mapper-0" on "localhost" with args "-mode map -part 0 -numPart 1 -master localhost:5000"
+[reducer-0] 2018/10/22 10:37:40 Registered at master
+[reducer-0] 2018/10/22 10:37:40 Reducing ...
+[mapper-0] 2018/10/22 10:37:41 Connected to master
+[master] 2018/10/22 10:37:41 Mapper started
+[mapper-0] 2018/10/22 10:37:41 Produced all words
+[master] 2018/10/22 10:37:41 Mapper stopped
+[mapper-0] 2018/10/22 10:37:41 Sent 3 elements to 1 reducers
+[master] 2018/10/22 10:37:41 All mappers finished, signaling reducers
+[mapper-0] 2018/10/22 10:37:41 Finished
+[reducer-0] 2018/10/22 10:37:41 Closed input
+[reducer-0] 2018/10/22 10:37:41 Counted all words
+def: 2
+abc: 4
+[master] 2018/10/22 10:37:41 Reducer stopped
+[master] 2018/10/22 10:37:41 All reducers finished, closing output
+[master] 2018/10/22 10:37:41 Waiting for tasks to finish
+2018/10/22 10:37:41 Output final result
+[reducer-0] 2018/10/22 10:37:41 Received 3 elements, sent 2 elements
+[reducer-0] 2018/10/22 10:37:41 Waiting for tasks to finish
+[mapper-0] Success
+signal: interrupt

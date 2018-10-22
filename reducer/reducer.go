@@ -1,3 +1,4 @@
+// Package reducer contains the reducer task of a MapReduce job.
 package reducer
 
 import (
@@ -5,129 +6,150 @@ import (
 	"net"
 	"net/rpc"
 	"os"
-	"strconv"
-	"strings"
-	"sync"
+	"sync/atomic"
 
 	"github.com/amsibamsi/knausrig/mapreduce"
 	"github.com/amsibamsi/knausrig/msg"
-	"github.com/amsibamsi/knausrig/util"
+)
+
+const (
+	chanSize = 10
 )
 
 var (
-	logger = log.New(os.Stderr, "", 0)
+	logger = log.New(os.Stderr, "", log.Lmicroseconds)
 )
 
-// Reducer ...
-type Reducer struct {
-	reduceFn mapreduce.ReduceFn
-	listener net.Listener
-	server   *rpc.Server
-	client   *rpc.Client
-	done     *sync.WaitGroup
-	elements map[string][]string
-	lock     *sync.Mutex
+// Service holds the methods to expose to mappers and the master nvia net/rpc
+// package.
+type Service struct {
+	r *Reducer
 }
 
-// NewReducer ...
-func NewReducer(reduceFn mapreduce.ReduceFn) *Reducer {
+// Element receives a data element from mappers.
+func (s *Service) Element(e [2]string, _ *msg.EmptyMsg) error {
+	s.r.input <- e
+	atomic.AddUint64(&s.r.inputCount, 1)
+	return nil
+}
+
+// Finish signals the reducer that all data from mappers has been sent and the
+// reducer should finish up.
+func (s *Service) Finish(_ *msg.EmptyMsg, _ *msg.EmptyMsg) error {
+	close(s.r.input)
+	logger.Print("Closed input")
+	return nil
+}
+
+// Reducer is the service to receive keyed data from mappers and reduce it per
+// key.
+type Reducer struct {
+	listen       string
+	service      *Service
+	listener     net.Listener
+	rpcServer    *rpc.Server
+	master       string
+	masterClient *rpc.Client
+	reduceFn     mapreduce.ReduceFn
+	input        chan [2]string
+	inputCount   uint64
+}
+
+// NewReducer returns a new reducer.
+func NewReducer(listen, master string, reduceFn mapreduce.ReduceFn) *Reducer {
 	r := Reducer{
+		listen:   listen,
+		master:   master,
 		reduceFn: reduceFn,
-		done:     &sync.WaitGroup{},
-		elements: make(map[string][]string),
-		lock:     &sync.Mutex{},
+		input:    make(chan [2]string, chanSize),
 	}
-	r.done.Add(1)
+	r.service = &Service{&r}
 	return &r
 }
 
-func (r *Reducer) serve() {
-	for {
-		conn, err := r.listener.Accept()
-		if err != nil {
-			logger.Printf("Error accepting connection: %v", err)
-			continue
-		}
-		go r.server.ServeConn(conn)
-	}
-}
-
-// Element ...
-func (r *Reducer) Element(e [2]string, _ *msg.EmptyMsg) error {
-	r.lock.Lock()
-	defer r.lock.Unlock()
-	if _, ok := r.elements[e[0]]; !ok {
-		r.elements[e[0]] = make([]string, 0)
-	}
-	r.elements[e[0]] = append(r.elements[e[0]], e[1])
-	logger.Print("Got new element")
-	return nil
-}
-
-// Start ...
-func (r *Reducer) Start(_ *msg.EmptyMsg, _ *msg.EmptyMsg) error {
-	logger.Print("Starting to reduce ...")
-	out := make(map[string]string)
-	for k, v := range r.elements {
-		logger.Printf("Reducing key %q with %d elements", k, len(v))
-		e, err := r.reduceFn(k, v)
-		if err != nil {
-			return err
-		}
-		out[k] = e
-	}
-	if err := r.client.Call("Master.Output", &out, msg.Empty); err != nil {
-		return err
-	}
-	r.done.Done()
-	logger.Print("Reducing finished")
-	return nil
-}
-
-// Run ...
-func (r *Reducer) Run(masterAddrs string) error {
+// serve creates a listener, and accepts and serves new network connections.
+func (r *Reducer) serve() error {
 	var err error
-	r.listener, err = net.Listen("tcp", ":0")
+	r.listener, err = net.Listen("tcp", r.listen)
 	if err != nil {
 		return err
 	}
-	r.server = rpc.NewServer()
-	r.server.Register(r)
-	port := r.listener.Addr().(*net.TCPAddr).Port
-	go r.serve()
+	r.rpcServer = rpc.NewServer()
+	r.rpcServer.Register(r.service)
+	go func() {
+		for {
+			conn, err := r.listener.Accept()
+			if err != nil {
+				logger.Printf("Failed to accept RPC connection: %v", err)
+				continue
+			}
+			go func() {
+				r.rpcServer.ServeConn(conn)
+			}()
+		}
+	}()
 	logger.Printf("Serving on %q", r.listener.Addr())
-	var conn net.Conn
-	for _, addr := range strings.Split(masterAddrs, ",") {
-		conn, err = net.Dial("tcp", addr)
-		if err == nil {
-			break
-		}
-	}
+	return nil
+}
+
+// connectMaster creates RPC client and connects it to the master.
+func (r *Reducer) connectMaster() error {
+	conn, err := net.Dial("tcp", r.master)
 	if err != nil {
 		return err
 	}
-	r.client = rpc.NewClient(conn)
-	defer r.client.Close()
-	logger.Printf("Connected to master on %q", conn.RemoteAddr())
-	addrs := ""
-	ips, err := util.LocalIPs()
-	if err != nil {
+	r.masterClient = rpc.NewClient(conn)
+	logger.Print("Connected to master")
+	return nil
+}
+
+// reduce starts the custom reduce function
+func (r *Reducer) reduce() error {
+	logger.Print("Reducing ...")
+	output := make(chan [2]string, chanSize)
+	go func() {
+		if err := r.reduceFn(r.input, output); err != nil {
+			logger.Print(err)
+		}
+		close(output)
+	}()
+	outCount := 0
+	for e := range output {
+		outCount++
+		if err := r.masterClient.Call("Service.Output", e, msg.Empty); err != nil {
+			logger.Print(err)
+		}
+	}
+	logger.Printf("Received %d elements, sent %d elements", r.inputCount, outCount)
+	return nil
+}
+
+// Run starts up the listener, waits for data from the mappers, reduces the
+// data and sends the result to the master.
+func (r *Reducer) Run() error {
+	if err := r.serve(); err != nil {
 		return err
 	}
-	for _, ip := range ips {
-		if addrs != "" {
-			addrs = addrs + ","
-		}
-		addrs = addrs + ip.String() + ":" + strconv.Itoa(port)
+	if err := r.connectMaster(); err != nil {
+		return err
 	}
-	if err := r.client.Call("Master.RegisterReducer", &addrs, msg.Empty); err != nil {
+	if err := r.masterClient.Call("Service.ReducerStart", msg.Empty, msg.Empty); err != nil {
 		return err
 	}
 	logger.Print("Registered at master")
-	r.done.Wait()
-	if err := r.client.Call("Master.ReducerFinished", msg.Empty, msg.Empty); err != nil {
+	if err := r.reduce(); err != nil {
+		return err
+	}
+	if err := r.masterClient.Call("Service.ReducerStop", msg.Empty, msg.Empty); err != nil {
 		return err
 	}
 	logger.Print("Finished")
 	return nil
+}
+
+// Main runs the reducer and logs any error.
+func (r *Reducer) Main() {
+	if err := r.Run(); err != nil {
+		logger.Fatal(err)
+	}
 }

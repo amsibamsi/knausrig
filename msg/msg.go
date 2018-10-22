@@ -1,15 +1,10 @@
+// Package msg contains basic types for messaging between RPC services.
 package msg
 
 var (
-	// Empty ...
+	// Empty var is a global shortcut for an empty message.
 	Empty = &EmptyMsg{}
 )
 
 // EmptyMsg is used in RPC for an empty message.
 type EmptyMsg struct{}
-
-// MapperInfo ...
-type MapperInfo struct {
-	Partition int64
-	Reducers  map[int64]string
-}

@@ -1,178 +1,352 @@
+// Package master contains the master process initiating and coordinating the
+// whole process of executing a MapReduce job.
 package master
 
 import (
-	"errors"
+	"bufio"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/rpc"
+	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 
+	"github.com/amsibamsi/knausrig/cfg"
 	"github.com/amsibamsi/knausrig/mapreduce"
 	"github.com/amsibamsi/knausrig/msg"
+	"github.com/amsibamsi/knausrig/util"
 )
 
-// Master ...
-type Master struct {
-	mappers            []string
-	numMappers         int
-	mappersCount       int64
-	mappersFinished    int64
-	reducers           []string
-	numReducers        int
-	reducersCount      int64
-	reducerMap         map[int64]string
-	reducersRegistered *sync.WaitGroup
-	reducersFinished   *sync.WaitGroup
-	outputDone         *sync.WaitGroup
-	listener           net.Listener
-	rpcServer          *rpc.Server
-	output             map[string]string
-	outputLock         *sync.Mutex
-	outputFn           mapreduce.OutputFn
+const (
+	chanSize = 10
+)
+
+var (
+	logger = log.New(os.Stderr, "[master] ", log.Lmicroseconds)
+)
+
+const (
+	eventMapperStop event = iota
+	eventReducerStart
+	eventReducerStop
+)
+
+// event is processed by the master, multiple in sequence, to control the flow
+// of a MapReduce job.
+type event int
+
+// Service holds the methods to expose to mappers/reducers via net/rpc package.
+type Service struct {
+	m *Master
 }
 
-// NewMaster ...
-func NewMaster(numMappers, numReducers int, outputFn mapreduce.OutputFn) *Master {
+// ReducerStart notifies the master of a new reducer being online.
+func (s *Service) ReducerStart(_ *msg.EmptyMsg, _ *msg.EmptyMsg) error {
+	logger.Print("Reducer started")
+	s.m.events <- eventReducerStart
+	return nil
+}
+
+// ReducerStop notifies the master that a reducer has finished.
+func (s *Service) ReducerStop(_ *msg.EmptyMsg, _ *msg.EmptyMsg) error {
+	logger.Print("Reducer stopped")
+	s.m.events <- eventReducerStop
+	return nil
+}
+
+// MapperStart sends the list of reducers to the mapper.
+func (s *Service) MapperStart(_ *msg.EmptyMsg, reducerMap *map[int]string) error {
+	logger.Print("Mapper started")
+	*reducerMap = s.m.reducerMap
+	return nil
+}
+
+// MapperStop indicates that a mapper has finished processing and sent all data
+// to reducers.
+func (s *Service) MapperStop(_ *msg.EmptyMsg, _ *msg.EmptyMsg) error {
+	logger.Print("Mapper stopped")
+	s.m.events <- eventMapperStop
+	return nil
+}
+
+// Output receives output from a reducer. Assuming that there is going to be at
+// most one call per key.
+func (s *Service) Output(req [2]string, _ *msg.EmptyMsg) error {
+	s.m.output <- req
+	return nil
+}
+
+// Master initializes everything and controls the execution of a MapReduce job.
+type Master struct {
+	config         *cfg.Config
+	tasks          *sync.WaitGroup
+	events         chan event
+	listener       net.Listener
+	rpcServer      *rpc.Server
+	service        *Service
+	reducerMap     map[int]string
+	reducerClients *util.RPCClients
+	outputFn       mapreduce.OutputFn
+	output         chan [2]string
+}
+
+// NewMaster returns a new master.
+func NewMaster(config *cfg.Config, outputFn mapreduce.OutputFn) *Master {
 	m := Master{
-		numMappers:         numMappers,
-		mappersCount:       -1,
-		mappersFinished:    0,
-		numReducers:        numReducers,
-		reducersCount:      -1,
-		reducerMap:         make(map[int64]string),
-		reducersRegistered: &sync.WaitGroup{},
-		reducersFinished:   &sync.WaitGroup{},
-		outputDone:         &sync.WaitGroup{},
-		output:             make(map[string]string),
-		outputLock:         &sync.Mutex{},
-		outputFn:           outputFn,
+		config:         config,
+		tasks:          &sync.WaitGroup{},
+		events:         make(chan event, chanSize),
+		reducerMap:     make(map[int]string),
+		reducerClients: util.NewRPCClients(),
+		outputFn:       outputFn,
+		output:         make(chan [2]string, chanSize),
 	}
-	m.reducersRegistered.Add(numReducers)
-	m.reducersFinished.Add(numReducers)
-	m.outputDone.Add(1)
+	m.service = &Service{&m}
+	for i, r := range config.Reducers {
+		m.reducerMap[i] = r
+	}
 	return &m
 }
 
-// Ping ...
-func (m *Master) Ping(_ *msg.EmptyMsg, _ *msg.EmptyMsg) error {
-	return nil
-}
+const (
+	// remoteRunTmpl is template to use for running current executable over SSH
+	// remotely. Should be expaned with Printf to add arguments for binary
+	// executed remotely.
+	//
+	// Note: Carefully construct shell command in a way that the temp binary is
+	// cleaned up, even if the executions fails.
+	remoteRunTmpl = `sh -c 'bin=$(mktemp) && cat - > $bin && chmod +x $bin` +
+		` && $bin %s; rm $bin'`
+)
 
-// RegisterReducer ...
-func (m *Master) RegisterReducer(addrs *string, _ *msg.EmptyMsg) error {
-	p := atomic.AddInt64(&m.reducersCount, 1)
-	if p >= int64(m.numReducers) {
-		return errors.New("No more free reducer range")
+// runMeRemote uses SSH to copy the binary of the current process to a remote
+// destination and tries to execute it there. The supplied args are passed to
+// the executable when it's run remotely. The binary is copied to a temp file
+// on the remote host, and removed again after execution (except when the
+// remote process is killed). The dst argument can be any valid destination
+// understood by the 'ssh' client executable.  Does not wait for the command to
+// finish and starts some goroutines to pipe stdout/stderr output to the log,
+// and to log final results of the process.
+func (m *Master) runMeRemote(id, dst, args string) error {
+	logger.Printf("%s: starting on %q with args %q", id, dst, args)
+	cmd := exec.Command("ssh", dst, fmt.Sprintf(remoteRunTmpl, args))
+	exeFilename, err := os.Executable()
+	exe, err := os.Open(exeFilename)
+	if err != nil {
+		return err
 	}
-	m.reducerMap[p] = *addrs
-	m.reducersRegistered.Done()
-	log.Printf("New reducer %q for partition %v", *addrs, p)
-	return nil
-}
-
-// ReducerFinished ...
-func (m *Master) ReducerFinished(_ *msg.EmptyMsg, _ *msg.EmptyMsg) error {
-	m.reducersFinished.Done()
-	return nil
-}
-
-// GetMapperInfo ...
-func (m *Master) GetMapperInfo(_ *msg.EmptyMsg, mapInfo *msg.MapperInfo) error {
-	m.reducersRegistered.Wait()
-	mapInfo.Partition = atomic.AddInt64(&m.mappersCount, 1)
-	if mapInfo.Partition >= int64(m.numMappers) {
-		return errors.New("No more free mapper range")
+	defer exe.Close()
+	remoteLog := log.New(os.Stderr, "["+id+"] ", 0)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
 	}
-	mapInfo.Reducers = m.reducerMap
-	log.Print("Sending info to mapper")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	// Background stdout logging
+	m.tasks.Add(1)
+	go func() {
+		defer m.tasks.Done()
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			remoteLog.Print(scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			logger.Printf("%s: error reading output: %v", id, err)
+		}
+	}()
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+	// Background stderr logging
+	m.tasks.Add(1)
+	go func() {
+		defer m.tasks.Done()
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			remoteLog.Print(scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			logger.Printf("%s: error reading error output: %v", id, err)
+		}
+	}()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if _, err := io.Copy(stdin, exe); err != nil {
+		return err
+	}
+	stdin.Close()
+	// Monitor cmd in background and report final result
+	m.tasks.Add(1)
+	go func() {
+		defer m.tasks.Done()
+		err := cmd.Wait()
+		if err != nil {
+			logger.Printf("%s: failed: %v", id, err)
+		} else {
+			logger.Printf("%s: success", id)
+		}
+	}()
 	return nil
 }
 
-// MapperFinished ...
-func (m *Master) MapperFinished(req *msg.EmptyMsg, resp *msg.EmptyMsg) error {
-	c := atomic.AddInt64(&m.mappersFinished, 1)
-	if c > int64(m.numMappers) {
-		return errors.New("All mappers already finished")
+// result takes data from the output channel, that reducers send to, and
+// outputs/writes the final result. This starts a goroutine.
+func (m *Master) result() {
+	m.tasks.Add(1)
+	go func() {
+		defer m.tasks.Done()
+		if err := m.outputFn(m.output); err != nil {
+			logger.Printf("Output failed: %v", err)
+		}
+	}()
+}
+
+// serve creates a listener, and accepts and serves new network connections.
+func (m *Master) serve() error {
+	var err error
+	m.listener, err = net.Listen("tcp", m.config.Master)
+	if err != nil {
+		return err
 	}
-	// TODO: separate this with wait group
-	if c == int64(m.numMappers) {
-		for _, r := range m.reducerMap {
-			addrs := strings.Split(r, ",")
-			var conn net.Conn
-			var err error
-			for _, addr := range addrs {
-				conn, err = net.Dial("tcp", addr)
-				if err == nil {
-					break
+	m.rpcServer = rpc.NewServer()
+	m.rpcServer.Register(m.service)
+	go func() {
+		for {
+			conn, err := m.listener.Accept()
+			if err != nil {
+				logger.Printf("Failed to accept RPC connection: %v", err)
+				continue
+			}
+			go func() {
+				m.rpcServer.ServeConn(conn)
+			}()
+		}
+	}()
+	logger.Printf("Serving on %q", m.listener.Addr())
+	return nil
+}
+
+// startReducers starts up all reducers via SSH.
+func (m *Master) startReducers() error {
+	for i, v := range m.config.Reducers {
+		dest := strings.Split(v, ":")[0]
+		args := fmt.Sprintf(
+			"-mode reduce -listen %s -master %s",
+			v,
+			m.config.Master,
+		)
+		id := "reducer-" + strconv.Itoa(i)
+		err := m.runMeRemote(id, dest, args)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// startMappers starts up all mappers via SSH.
+func (m *Master) startMappers() error {
+	numMappers := len(m.config.Mappers)
+	for i, v := range m.config.Mappers {
+		dest := strings.Split(v, ":")[0]
+		args := fmt.Sprintf(
+			"-mode map -part %d -numPart %d -master %s",
+			i,
+			numMappers,
+			m.config.Master,
+		)
+		id := "mapper-" + strconv.Itoa(i)
+		err := m.runMeRemote(id, dest, args)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// finishReducers signals all reducers that mapping has finished and they can
+// finish as well.
+func (m *Master) finishReducers() error {
+	for _, r := range m.reducerMap {
+		client, err := m.reducerClients.Client(r)
+		if err != nil {
+			return err
+		}
+		err = client.Call("Service.Finish", msg.Empty, msg.Empty)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Run steps through the MapReduce job, controlling its execution.
+func (m *Master) Run() error {
+	numReducers := len(m.config.Reducers)
+	numMappers := len(m.config.Mappers)
+	logger.Printf(
+		"Running MapReduce with %d mappers and %d reducers",
+		numMappers,
+		numReducers,
+	)
+	if err := m.serve(); err != nil {
+		return err
+	}
+	// Start pipeline in reverse order. Output needs to ready before reducers
+	// send, reducers need to be ready before mappers send.
+	m.result()
+	if err := m.startReducers(); err != nil {
+		return err
+	}
+	// Use events from here on
+	countReducers := 0
+	countMappers := 0
+EventLoop:
+	for {
+		switch event := <-m.events; event {
+		case eventReducerStart:
+			countReducers++
+			if countReducers >= numReducers {
+				logger.Print("All reducers ready, starting mappers")
+				if err := m.startMappers(); err != nil {
+					return err
 				}
 			}
-			if err != nil {
-				return err
+		case eventMapperStop:
+			countMappers++
+			if countMappers >= numMappers {
+				logger.Print("All mappers finished, signaling reducers")
+				if err := m.finishReducers(); err != nil {
+					return err
+				}
 			}
-			client := rpc.NewClient(conn)
-			if err := client.Call("Reducer.Start", msg.Empty, msg.Empty); err != nil {
-				return err
+		case eventReducerStop:
+			countReducers--
+			if countReducers <= 0 {
+				logger.Print("All reducers finished, closing output")
+				close(m.output)
+				break EventLoop
 			}
-			client.Close()
 		}
 	}
+	logger.Print("Waiting for tasks to finish")
+	m.tasks.Wait()
+	logger.Print("Finished")
 	return nil
 }
 
-// Output ...
-func (m *Master) Output(req map[string]string, resp *msg.EmptyMsg) error {
-	m.outputLock.Lock()
-	defer m.outputLock.Unlock()
-	for k, v := range req {
-		m.output[k] = v
+// Main runs the master and logs any error.
+func (m *Master) Main() {
+	if err := m.Run(); err != nil {
+		logger.Fatal(err)
 	}
-	return nil
-}
-
-// serve ...
-func (m *Master) serve() {
-	for {
-		conn, err := m.listener.Accept()
-		if err != nil {
-			log.Printf("Error accepting connection: %v", err)
-			continue
-		}
-		go m.rpcServer.ServeConn(conn)
-	}
-}
-
-// Run ...
-func (m *Master) Run() (int, error) {
-	log.Printf(
-		"Running MapReduce with %d mappers and %d reducers",
-		m.numMappers,
-		m.numReducers,
-	)
-	var err error
-	m.listener, err = net.Listen("tcp", ":0")
-	if err != nil {
-		return 0, err
-	}
-	addr := m.listener.Addr()
-	m.rpcServer = rpc.NewServer()
-	m.rpcServer.Register(m)
-	go m.serve()
-	log.Printf("Serving on %q", addr)
-	go func() {
-		m.reducersFinished.Wait()
-		if err := m.outputFn(m.output); err != nil {
-			log.Printf("Output error: %v", err)
-		}
-		m.outputDone.Done()
-	}()
-	port := addr.(*net.TCPAddr).Port
-	return port, nil
-}
-
-// WaitFinish ...
-func (m *Master) WaitFinish() {
-	m.reducersFinished.Wait()
-	m.outputDone.Wait()
 }

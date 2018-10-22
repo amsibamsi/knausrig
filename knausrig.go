@@ -1,125 +1,94 @@
+// Package knausrig provides a very cheap example of a MapReduce job, running
+// distributed processes via SSH. To start create a new MapReduce with
+// customized functions for mapping (includes inputting), reducing and
+// outputing data, then call Main() on it to start the process.
 package knausrig
 
 import (
 	"flag"
 	"fmt"
 	"log"
-	"os"
-	"strconv"
 
+	"github.com/amsibamsi/knausrig/cfg"
 	"github.com/amsibamsi/knausrig/mapper"
 	"github.com/amsibamsi/knausrig/mapreduce"
 	"github.com/amsibamsi/knausrig/master"
 	"github.com/amsibamsi/knausrig/reducer"
-	"github.com/amsibamsi/knausrig/util"
 )
 
 var (
-	operation = flag.String(
-		"operation",
-		"",
-		"Exactly one of 'run', 'map', 'reduce' (required)",
+	mode = flag.String(
+		"mode",
+		"master",
+		"Exactly one of 'master', 'map', 'reduce'",
 	)
-	mappersFilename = flag.String(
-		"mappersFile",
-		"mappers.txt",
-		"Text file listing SSH destinations to use as mapper workers"+
-			", one per line (operation: run)",
+	config = flag.String(
+		"config",
+		"./config.json",
+		"Configuration file for master (modes: master)",
 	)
-	reducersFilename = flag.String(
-		"reducersFile",
-		"reducers.txt",
-		"Text file listing SSH destinations to use as reducer workers"+
-			", one per line (operation: run)",
-	)
-	masterAddrs = flag.String(
+	masterAddr = flag.String(
 		"master",
 		"",
-		"Comma-delimited list of <net_address>:<port> to reach the master"+
-			"(operation: map, reduce; required)",
+		"<address>:<port> of master server"+
+			" (required; modes: map, reduce)",
+	)
+	part = flag.Int(
+		"part",
+		0,
+		"Partition assigned to this mapper/reducer"+
+			" (required; modes: map, reduce)",
+	)
+	numPart = flag.Int(
+		"numPart",
+		0,
+		"Number of partitions (number of mappers)"+
+			" (required; modes: map)",
+	)
+	listenAddr = flag.String(
+		"listen",
+		"",
+		"<address>:<port> for local listening"+
+			" (required; modes: reduce)",
 	)
 )
 
-var (
-	// Logger ...
-	logger = log.New(os.Stderr, "", 0)
-)
-
-// run ...
-func run(outputFn mapreduce.OutputFn) error {
-	mappers, err := util.ReadLines(*mappersFilename)
-	if err != nil {
-		return err
-	}
-	reducers, err := util.ReadLines(*reducersFilename)
-	if err != nil {
-		return err
-	}
-	master := master.NewMaster(len(mappers), len(reducers), outputFn)
-	port, err := master.Run()
-	if err != nil {
-		return err
-	}
-	addrs := ""
-	ips, err := util.LocalIPs()
-	if err != nil {
-		return err
-	}
-	for _, ip := range ips {
-		if addrs != "" {
-			addrs = addrs + ","
-		}
-		addrs = addrs + ip.String() + ":" + strconv.Itoa(port)
-	}
-	for i, reducer := range reducers {
-		args := fmt.Sprintf(
-			"-operation reduce -master %s",
-			addrs,
-		)
-		id := "reducer-" + strconv.Itoa(i)
-		if _, err := util.RunMeRemote(id, reducer, args); err != nil {
-			return err
-		}
-	}
-	for i, mapper := range mappers {
-		args := fmt.Sprintf(
-			"-operation map -master %s",
-			addrs,
-		)
-		id := "mapper-" + strconv.Itoa(i)
-		if _, err := util.RunMeRemote(id, mapper, args); err != nil {
-			return err
-		}
-	}
-	master.WaitFinish()
-	return nil
-}
-
-// MapReduce ...
-type MapReduce struct {
+// Job holds the 3 customized functions for the actual computations done by the
+// MapReduce job.
+type Job struct {
 	MapFn    mapreduce.MapFn
 	ReduceFn mapreduce.ReduceFn
 	OutputFn mapreduce.OutputFn
 }
 
-// Main evaluates the operation argument and either starts a new job, or a
+// Main evaluates the evaluates the mode and either starts a new job, or a new
 // mapper/reducer.
-func (m *MapReduce) Main() {
+func (j *Job) Main() {
 	flag.Parse()
-	switch *operation {
-	case "run":
-		if err := run(m.OutputFn); err != nil {
+	switch *mode {
+	case "master":
+		config, err := cfg.FromFile(*config)
+		if err != nil {
 			log.Fatal(err)
 		}
+		master.NewMaster(
+			config,
+			j.OutputFn,
+		).Main()
 	case "map":
-		if err := mapper.NewMapper(m.MapFn).Run(*masterAddrs); err != nil {
-			logger.Fatal(err)
-		}
+		mapper.NewMapper(
+			*part,
+			*numPart,
+			*masterAddr,
+			j.MapFn,
+		).Main()
 	case "reduce":
-		if err := reducer.NewReducer(m.ReduceFn).Run(*masterAddrs); err != nil {
-			logger.Fatal(err)
-		}
+		reducer.NewReducer(
+			*listenAddr,
+			*masterAddr,
+			j.ReduceFn,
+		).Main()
 	default:
-		log.Fatal(fmt.Errorf("Unknown operation: %q", *operation))
+		log.Fatal(fmt.Errorf("Unknown mode: %q", *mode))
 	}
 }
