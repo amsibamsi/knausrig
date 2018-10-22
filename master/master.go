@@ -26,7 +26,7 @@ const (
 )
 
 var (
-	logger = log.New(os.Stderr, "[master] ", log.LstdFlags)
+	logger = log.New(os.Stderr, "[master] ", log.Lmicroseconds)
 )
 
 const (
@@ -45,26 +45,30 @@ type Service struct {
 }
 
 // ReducerStart notifies the master of a new reducer being online.
-func (s *Service) ReducerStart(addr *string, _ *msg.EmptyMsg) error {
+func (s *Service) ReducerStart(_ *msg.EmptyMsg, _ *msg.EmptyMsg) error {
+	logger.Print("Reducer started")
 	s.m.events <- eventReducerStart
 	return nil
 }
 
 // ReducerStop notifies the master that a reducer has finished.
 func (s *Service) ReducerStop(_ *msg.EmptyMsg, _ *msg.EmptyMsg) error {
+	logger.Print("Reducer stopped")
 	s.m.events <- eventReducerStop
 	return nil
 }
 
 // MapperStart sends the list of reducers to the mapper.
-func (s *Service) MapperStart(_ *msg.EmptyMsg, reducerMap map[int]string) error {
-	reducerMap = s.m.reducerMap
+func (s *Service) MapperStart(_ *msg.EmptyMsg, reducerMap *map[int]string) error {
+	logger.Print("Mapper started")
+	*reducerMap = s.m.reducerMap
 	return nil
 }
 
 // MapperStop indicates that a mapper has finished processing and sent all data
 // to reducers.
 func (s *Service) MapperStop(_ *msg.EmptyMsg, _ *msg.EmptyMsg) error {
+	logger.Print("Mapper stopped")
 	s.m.events <- eventMapperStop
 	return nil
 }
@@ -128,7 +132,7 @@ const (
 // finish and starts some goroutines to pipe stdout/stderr output to the log,
 // and to log final results of the process.
 func (m *Master) runMeRemote(id, dst, args string) error {
-	logger.Printf("Starting remote %q on %q with args %q", id, dst, args)
+	logger.Printf("%s: starting on %q with args %q", id, dst, args)
 	cmd := exec.Command("ssh", dst, fmt.Sprintf(remoteRunTmpl, args))
 	exeFilename, err := os.Executable()
 	exe, err := os.Open(exeFilename)
@@ -154,7 +158,7 @@ func (m *Master) runMeRemote(id, dst, args string) error {
 			remoteLog.Print(scanner.Text())
 		}
 		if err := scanner.Err(); err != nil {
-			remoteLog.Printf("Error reading output: %v", err)
+			logger.Printf("%s: error reading output: %v", id, err)
 		}
 	}()
 	stderr, err := cmd.StderrPipe()
@@ -170,7 +174,7 @@ func (m *Master) runMeRemote(id, dst, args string) error {
 			remoteLog.Print(scanner.Text())
 		}
 		if err := scanner.Err(); err != nil {
-			remoteLog.Printf("Error reading error output: %v", err)
+			logger.Printf("%s: error reading error output: %v", id, err)
 		}
 	}()
 	if err := cmd.Start(); err != nil {
@@ -186,9 +190,9 @@ func (m *Master) runMeRemote(id, dst, args string) error {
 		defer m.tasks.Done()
 		err := cmd.Wait()
 		if err != nil {
-			remoteLog.Printf("Failed: %v", err)
+			logger.Printf("%s: failed: %v", id, err)
 		} else {
-			remoteLog.Print("Finished")
+			logger.Printf("%s: success", id)
 		}
 	}()
 	return nil
@@ -215,18 +219,14 @@ func (m *Master) serve() error {
 	}
 	m.rpcServer = rpc.NewServer()
 	m.rpcServer.Register(m.service)
-	m.tasks.Add(1)
 	go func() {
-		defer m.tasks.Done()
 		for {
 			conn, err := m.listener.Accept()
 			if err != nil {
 				logger.Printf("Failed to accept RPC connection: %v", err)
 				continue
 			}
-			m.tasks.Add(1)
 			go func() {
-				defer m.tasks.Done()
 				m.rpcServer.ServeConn(conn)
 			}()
 		}
@@ -333,15 +333,14 @@ EventLoop:
 			countReducers--
 			if countReducers <= 0 {
 				logger.Print("All reducers finished, closing output")
+				close(m.output)
 				break EventLoop
 			}
 		}
 	}
-	if err := m.listener.Close(); err != nil {
-		return err
-	}
-	close(m.output)
+	logger.Print("Waiting for tasks to finish")
 	m.tasks.Wait()
+	logger.Print("Finished")
 	return nil
 }
 

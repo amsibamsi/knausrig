@@ -8,9 +8,10 @@ import (
 )
 
 func words(part, numPart int, out chan<- [2]string) error {
-	out <- [2]string{"abc", "3"}
-	out <- [2]string{"def", "2"}
-	out <- [2]string{"abc", "1"}
+	for i := 0; i < 1e3; i++ {
+		out <- [2]string{"word1", "1"}
+		out <- [2]string{"word2", "2"}
+	}
 	return nil
 }
 

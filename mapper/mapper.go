@@ -6,7 +6,7 @@ import (
 	"log"
 	"net"
 	"net/rpc"
-	"sync"
+	"os"
 
 	"github.com/amsibamsi/knausrig/mapreduce"
 	"github.com/amsibamsi/knausrig/msg"
@@ -15,6 +15,10 @@ import (
 
 const (
 	chanSize = 10
+)
+
+var (
+	logger = log.New(os.Stderr, "", log.Lmicroseconds)
 )
 
 // Mapper reads input data and applies the user-defined mapping to it.
@@ -26,7 +30,6 @@ type Mapper struct {
 	masterClient   *rpc.Client
 	reducers       map[int]string
 	reducerClients *util.RPCClients
-	tasks          *sync.WaitGroup
 }
 
 // NewMapper returns a new mapper.
@@ -36,8 +39,8 @@ func NewMapper(part, numPart int, master string, mapFn mapreduce.MapFn) *Mapper 
 		numPart:        numPart,
 		mapFn:          mapFn,
 		master:         master,
+		reducers:       make(map[int]string),
 		reducerClients: util.NewRPCClients(),
-		tasks:          &sync.WaitGroup{},
 	}
 }
 
@@ -47,7 +50,7 @@ func (m *Mapper) connectMaster() error {
 		return err
 	}
 	m.masterClient = rpc.NewClient(conn)
-	log.Print("Connected to master")
+	logger.Print("Connected to master")
 	return nil
 }
 
@@ -59,7 +62,7 @@ func (m *Mapper) mapShuffle() error {
 	// Input and map
 	go func() {
 		if err := m.mapFn(m.part, m.numPart, out); err != nil {
-			log.Printf("Error in map function: %v", err)
+			logger.Printf("Error in map function: %v", err)
 		}
 		close(out)
 	}()
@@ -79,7 +82,7 @@ func (m *Mapper) mapShuffle() error {
 			return err
 		}
 	}
-	log.Printf("Sent %d elements to %d reducers", count, len(m.reducers))
+	logger.Printf("Sent %d elements to %d reducers", count, len(m.reducers))
 	return nil
 }
 
@@ -89,25 +92,22 @@ func (m *Mapper) Run() error {
 	if err := m.connectMaster(); err != nil {
 		return err
 	}
-	rmap := make(map[int]string)
-	if err := m.masterClient.Call("Service.MapperStart", msg.Empty, rmap); err != nil {
+	if err := m.masterClient.Call("Service.MapperStart", msg.Empty, &m.reducers); err != nil {
 		return err
 	}
-	m.reducers = rmap
-	log.Print("Got reducers map")
 	if err := m.mapShuffle(); err != nil {
 		return err
 	}
 	if err := m.masterClient.Call("Service.MapperStop", msg.Empty, msg.Empty); err != nil {
 		return err
 	}
-	log.Print("Finished")
+	logger.Print("Finished")
 	return nil
 }
 
 // Main runs the mapper and logs any errors.
 func (m *Mapper) Main() {
 	if err := m.Run(); err != nil {
-		log.Fatal(err)
+		logger.Fatal(err)
 	}
 }
